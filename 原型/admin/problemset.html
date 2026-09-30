@@ -1,0 +1,192 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>题单导入接口规范 v1</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/contest.css">
+</head><body>
+<div class="wrap"><h1>题单导入接口规范 v1</h1>
+
+<p class="muted">管理端 · <a href="contests.html">比赛列表</a> · <a href="problems.html">题目列表</a> · <a href="problem.html">新建题目</a> · <a href="../overview.html">原型总览</a></p>
+
+<div class="card stmt">
+<p>把一个「出题工程」整包导入评测站（Hydro）。<b>题单结构完全参照现有出题工程的规范</b>
+（<code>题目库_规范.md</code> 的定义），导入器按该结构自动识别题面、测试数据与标程。</p>
+
+<div class="me-card">
+  <b>导入时不用管标识和编号，系统自己分配</b><br>
+  下面是出题工程的文件规范（题面放哪、数据怎么命名），照着打包就行。
+  导入后每道题由系统分配身份，老师选题时按<b>标题</b>找即可，不需要记标识。<br>
+  <span class="muted">所以换题单、改题面、调整题目顺序，都不会让学生已经练熟的编号变样。</span>
+</div>
+
+<hr>
+
+<h2>一、题单结构规范</h2>
+<p>一个题单是一个 <b>zip</b> 或一个<b>目录</b>，内部按下面两种形态之一组织（都支持）：</p>
+
+<h3>形态 A：标准出题工程（推荐，即现有 zip 的形态）</h3>
+<pre class="stmt-code">题单.zip
+└── 题目库/                        ← 任意层级的容器目录（可为空，也可叫其它名字）
+    ├── _索引.md                   ← 【可选】题单索引表，提供难度与考点
+    ├── D01-最小值切分贡献/
+    │   ├── 题目.md                ← 【必需】题面（Markdown）
+    │   ├── 标程.cpp               ← 【必需】标准程序
+    │   ├── 暴力.cpp               ← 忽略
+    │   ├── 生成器.py              ← 忽略
+    │   ├── D01-洛谷上传.zip        ← 忽略
+    │   ├── 大样例/                 ← 忽略（大样例.in/.out）
+    │   └── data/                  ← 【必需】测试点
+    │       ├── 01.in  01.out      ←   两位数字命名、成对出现
+    │       ├── 02.in  02.out
+    │       ├── …
+    │       └── 样例1.in  样例1.out ←   题目样例：按规范<b>不参与评测</b>，自动忽略
+    └── G01-加边后最小生成树/
+        └── …（同上）</pre>
+
+<h3>形态 B：扁平题包（没有分类号时也能用）</h3>
+<pre class="stmt-code">题单.zip
+└── A+B问题/
+    ├── 题目.md
+    ├── 标程.cpp
+    └── data/01.in 01.out …</pre>
+
+<h3>字段与命名规则</h3>
+<table>
+<tr><th>项目</th><th>规则</th><th>说明</th></tr>
+<tr><td>题目目录</td><td><code>&lt;分类号&gt;-&lt;题名&gt;</code></td><td>分类号 = 1~3 位大写字母 + 两位数字（<code>G01</code>/<code>DP01</code>/<code>ST04</code>）；题名用中文，不含 <code>/ \ : * ? " &lt; &gt; |</code></td></tr>
+<tr><td><b>题目标识（pid）</b></td><td>取<b>分类号</b></td><td>站点上题目的唯一标识，如 <code>G01</code>；形态 B 无分类号时用目录名清洗后的字母数字串</td></tr>
+<tr><td><b>标题</b></td><td>取分类号后的<b>题名</b></td><td>如 <code>加边后最小生成树</code></td></tr>
+<tr><td>题面</td><td><code>题目.md</code>（也认 <code>题面.md</code>/<code>statement.md</code>/<code>problem.md</code>/<code>README.md</code>）</td><td>Markdown，站点按 Markdown 渲染（支持 <code>$…$</code> 公式）</td></tr>
+<tr><td>测试点</td><td><code>data/</code> 下 <code>&lt;数字&gt;.in</code> + 同名 <code>.out</code></td><td>按数字<b>升序</b>重排为站点的 <code>1.in/1.out</code>、<code>2.in/2.out</code>…（前导零无关）</td></tr>
+<tr><td>标程</td><td><code>标程.cpp</code>（也认 <code>std.cpp</code>/<code>solution.cpp</code>/<code>ac.cpp</code>/<code>correct.cpp</code>）</td><td>导入后站点会<b>自动编译并评测标程</b>，可用于反向验证数据与标程是否一致</td></tr>
+<tr><td>难度</td><td><code>_索引.md</code> 的「难度」列</td><td>按洛谷 7 级标签映射为站点难度 1~7，原始标签保留为标签 <code>难度:&lt;原文&gt;</code></td></tr>
+<tr><td>考点</td><td><code>_索引.md</code> 的「考点」列</td><td>按规范用全角竖线 <code>｜</code> 分隔（也兼容 <code>\|</code>、<code>、</code>、<code>,</code>、<code>/</code>），每个考点作为一个标签</td></tr>
+<tr><td>时限/内存</td><td>接口参数（默认 1000ms / 256MB）</td><td>也可用 <code>--time</code> / <code>--memory</code> 覆盖</td></tr>
+</table>
+
+<h3>自动忽略的文件</h3>
+<p><code>*.exe</code>、<code>*-洛谷上传.zip</code>、<code>大样例/</code>、<code>data/样例*</code>、<code>__pycache__/</code>、<code>跑数据.py</code>、<code>暴力.cpp</code>、<code>生成器.py</code>
+—— 这些是出题过程的附属物，不参与导入（与你现有的洛谷打包规范一致）。</p>
+
+<h3><code>_索引.md</code> 的格式（可选但推荐）</h3>
+<pre class="stmt-code">| 编号 | 分类号 | 题名 | 难度 | 考点 | 测试点 | 大样例 | 状态 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 001 | G01 | 加边后最小生成树 | 提高+/省选− | 最小生成树｜树上路径最大边｜增量维护 | 20 + 样例2 | 1 组 | ✅ 已通过 |</pre>
+<p>导入器只读取 <b>分类号 / 题名 / 难度 / 考点</b> 四列。</p>
+
+<hr>
+
+<h2>二、导入结果</h2>
+<p>每道题在站点上生成一个题目：</p>
+<table>
+<tr><th>站点字段</th><th>来源</th></tr>
+<tr><td>pid</td><td>分类号（冲突时：默认跳过，<code>--overwrite</code> 则先删除旧题再导入）</td></tr>
+<tr><td>标题</td><td>题名</td></tr>
+<tr><td>题面</td><td><code>题目.md</code></td></tr>
+<tr><td>标签</td><td>参数 <code>--tag</code> 指定的标签 + 考点 + <code>难度:&lt;原文&gt;</code></td></tr>
+<tr><td>难度</td><td>难度标签映射值（1~7）</td></tr>
+<tr><td>时限/内存</td><td>接口参数</td></tr>
+<tr><td>测试点</td><td><code>data/&lt;数字&gt;.in|.out</code> 顺序重排后的全部数据（<b>样例不参与评测</b>）</td></tr>
+<tr><td>标准程序</td><td><code>标程.cpp</code>（导入后自动评测，可在题目页「提交记录」里看到结果）</td></tr>
+</table>
+
+<hr>
+
+<h2>三、命令行接口</h2>
+<pre class="stmt-code">python3 import_problemset.py &lt;zip 或 目录&gt; [选项]</pre>
+<table>
+<tr><th>选项</th><th>说明</th></tr>
+<tr><td><code>--tag 名称</code></td><td>额外打上的标签，可重复；例如 <code>--tag 寒假作业 --tag CSP-J</code></td></tr>
+<tr><td><code>--time 毫秒</code></td><td>时限，默认 1000</td></tr>
+<tr><td><code>--memory MB</code></td><td>内存，默认 256</td></tr>
+<tr><td><code>--only G01,D01</code></td><td>只导入指定题目标识（逗号分隔）</td></tr>
+<tr><td><code>--overwrite</code></td><td>站点已存在同标识题目时先删除再导入（默认跳过）</td></tr>
+<tr><td><code>--dry-run</code></td><td>只解析并生成题目包、打印报告，<b>不导入站点</b>（用于先检查结构）</td></tr>
+<tr><td><code>--workdir 目录</code></td><td>题目包输出目录（默认临时目录，导入后自动清理）</td></tr>
+<tr><td><code>--json 报告.json</code></td><td>把结构化报告写到文件</td></tr>
+</table>
+<p><b>退出码</b>：全部成功 <code>0</code>；有题目校验失败 <code>1</code>。</p>
+<p>示例：</p>
+<pre class="stmt-code"># 先干跑，确认识别结果对不对
+python3 import_problemset.py 题单.zip --dry-run
+
+# 正式导入，并打上"寒假作业"标签
+python3 import_problemset.py 题单.zip --tag 寒假作业 --time 2000 --memory 512
+
+# 只导入两道题，覆盖同名题目，并留档报告
+python3 import_problemset.py 题单.zip --only G01,D01 --overwrite --json /root/report.json</pre>
+
+<hr>
+
+<h2>四、HTTP 接口（教师端）</h2>
+<p>服务地址：<code>http://<你的服务器IP>:8080</code>（管理密钥见服务器 <code>/root/csp-exam/data/admin_key.txt</code>）。</p>
+
+<h3>1) 提交导入任务</h3>
+<pre class="stmt-code">POST /api/problemset/import?key=&lt;管理密钥&gt;
+Content-Type: multipart/form-data</pre>
+<table>
+<tr><th>表单字段</th><th>必需</th><th>说明</th></tr>
+<tr><td><code>file</code></td><td>是</td><td>题单 zip 文件（字段名也接受 <code>zipfile</code>）</td></tr>
+<tr><td><code>tag</code></td><td>否</td><td>额外标签，可重复</td></tr>
+<tr><td><code>time</code></td><td>否</td><td>时限（毫秒）</td></tr>
+<tr><td><code>memory</code></td><td>否</td><td>内存（MB）</td></tr>
+<tr><td><code>only</code></td><td>否</td><td>只导入指定标识，逗号分隔</td></tr>
+<tr><td><code>overwrite</code></td><td>否</td><td><code>1</code> 表示覆盖同名题目</td></tr>
+<tr><td><code>dry_run</code></td><td>否</td><td><code>1</code> 表示只解析不导入</td></tr>
+</table>
+<p>响应（立即返回，导入在后台进行）：</p>
+<pre class="stmt-code">{
+  "ok": true,
+  "job": "ps-1727262000-ab12cd",
+  "message": "已接收题单（114.9 MB），正在后台导入",
+  "report_url": "/api/problemset/report?key=...&amp;job=ps-1727262000-ab12cd"
+}</pre>
+
+<h3>2) 查询导入进度与报告</h3>
+<pre class="stmt-code">GET /api/problemset/report?key=&lt;管理密钥&gt;&amp;job=&lt;任务号&gt;</pre>
+<p>导入中：</p>
+<pre class="stmt-code">{ "ok": true, "state": "running", "progress": "已导入 5/17：G01 加边后最小生成树" }</pre>
+<p>完成后（<code>state</code> 为 <code>done</code> / <code>failed</code>）：</p>
+<pre class="stmt-code">{
+  "ok": true,
+  "state": "done",
+  "report": {
+    "total": 17,
+    "imported": ["G01", "G02", "..."],
+    "skipped": [],
+    "failed": [],
+    "elapsed_s": 145.2,
+    "problems": [
+      { "pid": "G01", "title": "加边后最小生成树", "case_count": 20,
+        "difficulty": 5, "difficulty_label": "提高+/省选−",
+        "topics": ["最小生成树", "树上路径最大边", "增量维护"],
+        "has_statement": true, "has_std": true, "status": "imported", "message": "" }
+    ]
+  }
+}</pre>
+
+<h3>3) 错误码</h3>
+<table>
+<tr><th>HTTP</th><th>场景</th></tr>
+<tr><td>400</td><td>没有上传文件 / 不是 zip / 表单不合法</td></tr>
+<tr><td>403</td><td>管理密钥不正确</td></tr>
+<tr><td>404</td><td>任务号不存在</td></tr>
+<tr><td>413</td><td>上传文件过大（上限 512MB）</td></tr>
+</table>
+<p>教师端页面已内置同一接口的上传表单：<code>/admin?key=…</code> → 「导入题单」。</p>
+
+<hr>
+
+<h2>五、注意事项</h2>
+<ol>
+<li><b>样例不参与评测</b>：<code>data/样例*.in/out</code> 与 <code>大样例/</code> 一律忽略（与你现有洛谷打包规范一致）；导入的测试点只有 <code>data/&lt;数字&gt;.in|.out</code>。</li>
+<li><b>幂等</b>：同一份题单重复导入，站点已有的题目会被跳过并在报告里列出；确需覆盖用 <code>--overwrite</code>（会删除旧题目及其提交记录，慎用）。</li>
+<li><b>标程即质检</b>：导入后站点会自动编译并评测标程。若标程不是 AC，说明该题的<b>数据或标程有问题</b>，可在题目页「提交记录」里看到具体判定（这是导入环节自带的免费质检）。</li>
+<li><b>题目包落盘位置</b>：宿主机 <code>/root/hydro/data/backend/import/&lt;pid&gt;/</code>（容器内 <code>/root/.hydro/import/&lt;pid&gt;/</code>）。注意这两个路径的对应关系，命令行里要用<b>容器内路径</b>。</li>
+<li><b>大文件</b>：数据文件按流式复制，不会整包读进内存；单次上传上限 512MB。</li>
+<li><b>编码</b>：题面与标程按 UTF-8 读取，遇到 GBK 会自动回退（Windows 下生成的文件常见）。</li>
+</ol>
+</div>
+
+<p class="muted" style="margin-top:34px"><a href="../overview.html">← 原型页面总览</a> · CSP 训练站 · 评测由 Hydro 提供</p>
+</div></body></html>

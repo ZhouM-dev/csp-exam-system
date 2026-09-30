@@ -1,0 +1,142 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>考生须知 · 2026年9月26日南山CC</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/contest.css">
+</head><body>
+<div class="wrap"><h1>考生须知 · 2026年9月26日南山CC</h1>
+
+<p class="muted">考号 <b>GD-S10029</b>（学生13） · <a href="hall.html">返回比赛</a> · <a href="index.html">退出</a></p>
+
+<div class="flash flash-info">
+  <b>开考前请先读完这一页。</b>真实 CSP-J/S 第二轮的很多"爆零"都不是算法问题，而是<b>文件名写错、目录放错、忘了 freopen</b>。
+</div>
+
+<h2>一、比赛安排</h2>
+<div class="card">
+<div class="kv">
+  <div><b>赛制</b>CSP 赛制（提高级 S 组）</div>
+  <div><b>时长</b>4 小时</div>
+  <div><b>满分</b>300 分（3 题 × 100）</div>
+  <div><b>提交方式</b>交考号文件夹</div>
+  <div><b>成绩</b>赛后由老师公布</div>
+</div>
+<table style="margin-top:12px">
+<tr><th>级别</th><th>考试时长</th><th>考号前缀</th></tr>
+<tr><td>入门级（J 组）</td><td>3.5 小时</td><td><code>GD-J</code> + 5 位随机数，如 GD-J58437</td></tr>
+<tr><td>提高级（S 组）</td><td>4 小时</td><td><code>GD-S</code> + 5 位随机数，如 GD-S10029</td></tr>
+</table>
+<p class="muted" style="margin-top:8px">考号请以准考证为准（<b>不是机号</b>）。认证开始 15 分钟后禁止入场。<br>
+   5 位数字是<b>纯随机数</b>，不是从 1 顺着排的，所以别去猜别人的号，也别指望自己的号有规律。</p>
+</div>
+
+<h2>二、目录结构（最重要）</h2>
+<div class="card">
+<div class="me-card">
+  <b>题目编号由系统自动给出，你不用猜也不用记</b><br>
+  第 1 题 → <span class="me-name">T1</span>、第 2 题 → <span class="me-name">T2</span>、第 3 题 → <span class="me-name">T3</span>⋯⋯
+  本场题目表里每题都标着编号，比赛页也能看到。<br>
+  <span class="muted">文件夹名、源文件名、freopen 的文件名，三处都用同一个编号。</span>
+</div>
+<p>在<b>给定磁盘驱动器的根目录</b>下，建立一个以自己考号命名的目录，所有提交文件都放在它里面：</p>
+<div class="tree">D:\GD-S10029\                 ← 考号目录，建在盘符根目录下
+
+├── 学生13.txt               ← 个人信息文件（文件名＝你的名字）
+├── T1\
+│   └── T1.cpp            ← 第 1 题的代码（编号 T1）
+├── T2\
+│   └── T2.cpp            ← 第 2 题的代码（编号 T2）
+└── T3\
+    └── T3.cpp            ← 第 3 题的代码（编号 T3）</div>
+<div class="rule-warn">
+  <b>命名红线：写错一个字符，这一题就是 0 分</b>
+  <ul>
+    <li><code>_</code> 与 <code>-</code> 的区别：<code>GD-S10029</code> 不是 <code>GD_S00001</code></li>
+    <li>大小写严格区分：<code>T1</code> 不能写成 <code>t1</code> 或 <code>Tl</code>；后缀必须小写 <code>.cpp</code></li>
+    <li>文件夹名不得出现空格（包括前后）</li>
+    <li>三层名字必须一致：考号文件夹 → 题目编号子文件夹 → 题目编号.cpp</li>
+    <li>不要交 <code>.in</code> / <code>.out</code> / <code>.exe</code> 等多余文件</li>
+  </ul>
+</div>
+</div>
+
+<h2>三、个人信息文件</h2>
+<div class="card">
+<div class="me-card">
+  在考号目录下写一个以<b>自己名字</b>为文件名的文本文件，例如 <span class="me-name">学生13.txt</span><br>
+  内容：姓名、性别、年级、地区、学校、辅导老师、提交的程序。<span class="muted">格式无特殊要求。</span>
+</div>
+<p class="muted" style="margin-bottom:0">这个文件不参与评分，但广东考区要求必须有。本场应提交：<code>学生13.txt</code></p>
+</div>
+
+<h2>四、程序编写要求</h2>
+<div class="card">
+<table>
+<tr><th>项目</th><th>要求</th></tr>
+<tr><td>输入输出</td><td><b>均为文件</b>，读写都在<b>当前路径</b>下（不带绝对路径）</td></tr>
+<tr><td>提示信息</td><td><b>不做任何输入输出提示</b>，多余的提示<b>判为错误</b></td></tr>
+<tr><td>输出比较</td><td>过滤行末空格和文尾回车后<b>全文比较</b></td></tr>
+<tr><td>行首</td><td>不允许多余空格</td></tr>
+<tr><td>空行</td><td>前部和中间不允许多余空行</td></tr>
+<tr><td>同行分隔</td><td>多元素间<b>有且仅有一个</b>空格</td></tr>
+<tr><td>保存</td><td><b>每 15 分钟保存一次程序</b>，以防机器故障</td></tr>
+</table>
+</div>
+
+<h2>五、怎么算分</h2>
+<div class="card">
+<p><b>按测试点给分，过几个给几分——不捆绑。</b></p>
+<div class="flash flash-ok" style="margin:10px 0">
+  20 个测试点每个 5 分。过了 9 个就是 <b>45 分</b>；第 9 个点属于哪个子任务、
+  那个子任务里的其他点过没过，<b>都不影响</b>你已经拿到的这 5 分。
+</div>
+<p>题面里那张「子任务」表，是把测试点按<b>数据范围</b>分了个组，告诉你每段数据值多少分——</p>
+<ul>
+  <li>它<b>只是分组说明</b>，方便你看出自己的能力边界（比如"小数据能过、大数据 TLE"）</li>
+  <li>它<b>不是「整个子任务全过才给分」</b>——多过一个点就多一截分</li>
+</ul>
+<p class="muted" style="margin-bottom:0">所以做题时不要因为"反正这个子任务过不全"就放弃：
+   能把暴力分的点拿到手，就先拿到手。</p>
+</div>
+
+<h2>六、编译环境（Windows 与 NOI Linux 的坑）</h2>
+<div class="card">
+<p>最终成绩以 CCF 在 <b>NOI Linux 2.0</b> 及指定评测工具下的结果为准。编译问题由考生负责，
+   因环境差异提出的申诉<b>概不受理</b>。</p>
+<table>
+<tr><th>在 Windows 上这样写</th><th>到 NOI Linux 会怎样</th><th>应该改成</th></tr>
+<tr><td><code>__int64</code></td><td>无法编译</td><td><code>long long</code></td></tr>
+<tr><td><code>%I64d</code></td><td>无法编译</td><td><code>%lld</code> 或 cin/cout</td></tr>
+<tr><td>CRLF 换行</td><td>一般无影响，但不建议手工处理文件</td><td>保持原样即可</td></tr>
+<tr><td>文件名大小写随便写</td><td><b>找不到文件</b></td><td>严格按系统给的编号</td></tr>
+</table>
+<p class="muted" style="margin-bottom:0">本平台用 Linux 上的 g++ 评测，与考场同向；但你在本机用的编辑器与考场不同，
+   关键写法请自己确认。</p>
+</div>
+
+<h2>七、考场纪律</h2>
+<div class="card">
+<ul>
+<li>认证开始 <b>15 分钟后禁止入场</b>，以缺考处理</li>
+<li><b>不能提前交卷</b>（认证进行 2 小时后方可离开）</li>
+<li><b>不能带任何资料进场</b>（包括纸张和电子器材）</li>
+<li>需签署《CSP-J/S 诚信考试及知情同意书》（考点统一提供）</li>
+<li>考试结束立即停止答题，离开后禁止逗留或返回</li>
+</ul>
+</div>
+
+<h2>八、在全真模式下，你会看到什么</h2>
+<div class="card">
+<p>本场已开启<b>全真模式</b>，界面与真实考场保持一致：</p>
+<table>
+<tr><th>会看到</th><th>不会看到</th></tr>
+<tr><td>距离考试结束的倒计时</td><td>编译信息</td></tr>
+<tr><td>每题「已提交 / 未提交」的状态卡片</td><td>测试点通过情况</td></tr>
+<tr><td>你交上去的代码（点开核对）</td><td>任何分数（连"部分正确"都没有）</td></tr>
+</table>
+<p class="muted" style="margin-bottom:0">所以交之前一定自己核对：<b>文件名、目录位置、freopen 的文件名</b>。
+   真实考场里，这些错了没人会提醒你。</p>
+</div>
+
+<p class="muted" style="margin-top:34px"><a href="../overview.html">← 原型页面总览</a> · CSP 训练站 · 评测由 Hydro 提供</p>
+</div></body></html>

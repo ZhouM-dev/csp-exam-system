@@ -1,0 +1,80 @@
+/* ============================================================
+   CSP 训练站 · 本地原型共用样式
+   这份 CSS 从线上页面原样提取，确保本地原型与线上外观一致。
+   修改样式请同时考虑线上 ui.py 的 CSS 常量。
+   ============================================================ */
+
+*{box-sizing:border-box}
+body{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;
+     background:#f5f6f8;color:#222;line-height:1.65}
+.wrap{max-width:1000px;margin:0 auto;padding:18px 16px 60px}
+h1{font-size:22px;margin:6px 0 4px}
+h2{font-size:17px;margin:22px 0 8px;padding-bottom:6px;border-bottom:2px solid #e3e6ea}
+.card{background:#fff;border:1px solid #e3e6ea;border-radius:10px;padding:16px 18px;margin:12px 0}
+.muted{color:#777;font-size:13px}
+input[type=text],input[type=password],textarea,select{width:100%;padding:9px 11px;border:1px solid #ccd2d8;
+     border-radius:7px;font-size:15px;font-family:inherit}
+textarea{min-height:130px;font-family:ui-monospace,Consolas,monospace}
+textarea.code{min-height:420px;font-size:14.5px;line-height:1.6;white-space:pre;tab-size:4}
+button,.btn{background:#2563eb;color:#fff;border:0;border-radius:7px;padding:10px 20px;
+     font-size:15px;cursor:pointer;text-decoration:none;display:inline-block}
+button:hover,.btn:hover{background:#1d4ed8}
+.btn-gray{background:#6b7280}.btn-gray:hover{background:#4b5563}
+.btn-sm{padding:5px 12px;font-size:13px}
+.btn-danger{background:#dc2626}.btn-danger:hover{background:#b91c1c}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{border-bottom:1px solid #e8ebee;padding:7px 8px;text-align:left}
+th{background:#f2f4f7;font-weight:600}
+pre{background:#0f172a;color:#e2e8f0;padding:13px;border-radius:8px;overflow:auto;
+    font-size:13px;line-height:1.5}
+.ok{color:#15803d}.warn{color:#b45309}.err{color:#b91c1c}
+.tag{display:inline-block;padding:1px 8px;border-radius:11px;font-size:12px;background:#e5e7eb}
+.tag-oi{background:#e0e7ff;color:#3730a3}.tag-ioi{background:#dcfce7;color:#166534}
+.tag-csp{background:#fef3c7;color:#92400e}
+.tag-ok{background:#dcfce7;color:#15803d}.tag-bad{background:#fee2e2;color:#b91c1c}
+.tag-wait{background:#f1f5f9;color:#475569}
+.tree{font-family:ui-monospace,Consolas,monospace;font-size:13px;background:#f8fafc;
+      color:#334155;border:1px dashed #cbd5e1;border-radius:8px;padding:12px;white-space:pre}
+.kv{display:flex;flex-wrap:wrap;gap:20px}
+.kv div{min-width:140px}
+.kv b{display:block;font-size:12px;color:#777;font-weight:400}
+.flash{padding:11px 14px;border-radius:8px;margin:10px 0}
+.flash-ok{background:#dcfce7;border:1px solid #86efac}
+.flash-err{background:#fee2e2;border:1px solid #fca5a5}
+.flash-info{background:#e0f2fe;border:1px solid #7dd3fc}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.part{color:#b45309}                       /* 部分分：既不是对也不是错 */
+.kv a{text-decoration:none}
+.code-view{max-height:520px;font-size:13px}
+.code-numbered{line-height:1.55}
+.tree-link a{color:#1d4ed8;text-decoration:none}
+.tree-link a:hover{text-decoration:underline}
+.tree-link{line-height:1.8}
+.stmt h2,.stmt h3{margin:18px 0 8px;padding:0;border:0}
+.stmt h4,.stmt h5,.stmt h6{margin:14px 0 6px}
+.stmt p{margin:8px 0}
+.stmt pre,.stmt-code{background:#f8fafc;color:#334155;border:1px solid #e2e8f0;
+     border-radius:8px;padding:10px 12px;font-size:13.5px;overflow:auto}
+.stmt code{background:#f1f5f9;border-radius:4px;padding:1px 5px;
+     font-family:ui-monospace,Consolas,monospace}
+.stmt pre code{background:none;padding:0}
+.stmt ul,.stmt ol{margin:8px 0 8px 22px}
+.stmt blockquote{margin:8px 0;padding:6px 12px;border-left:3px solid #cbd5e1;color:#475569}
+.stmt table{margin:10px 0}
+.stmt hr{border:0;border-top:1px solid #e2e8f0;margin:16px 0}
+.csp-picker{display:flex;gap:8px}
+.csp-picker input{flex:1}
+.csp-catalog{max-height:210px;overflow:auto;border:1px solid #e3e6ea;border-radius:8px;
+     background:#fff;padding:6px;display:flex;flex-wrap:wrap;gap:6px}
+.csp-cat-item{background:#f1f5f9;color:#1f2937;border:1px solid #dbe1e8;border-radius:7px;
+     padding:5px 10px;font-size:13px;cursor:pointer;text-align:left}
+.csp-cat-item:hover{background:#e0e7ff;border-color:#a5b4fc}
+.csp-cat-item code{font-weight:600;margin-right:5px}
+.csp-picked-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+     border:1px solid #e3e6ea;border-radius:8px;background:#fff;padding:8px 10px;margin:8px 0}
+.csp-picked-row code{background:#f1f5f9;border-radius:5px;padding:2px 7px}
+.csp-picked-row label{font-size:13px;color:#777;display:flex;gap:6px;align-items:center}
+.csp-picked-row label input{width:150px;padding:5px 8px;font-size:14px}
+.csp-picked-row button{margin-left:0}
+.csp-manual{margin-top:12px}
+.csp-manual summary{cursor:pointer;color:#2563eb}

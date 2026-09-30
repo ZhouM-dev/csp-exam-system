@@ -1,0 +1,253 @@
+/* ============================================================
+   CSP 训练站 · 考场规则相关样式（本地原型）
+   对应广东考区真实要求：倒计时、题目状态卡片、交卷检查清单、
+   命名红线提示、个人信息文件。
+   ============================================================ */
+
+/* ---- 顶部倒计时（对齐真实程序回收系统的「距离考试结束：254:08:59」）---- */
+.timer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 18px;
+  margin: 12px 0;
+}
+.timer-bar .timer-label { font-size: 14px; color: #94a3b8; }
+.timer-bar .timer-value {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  font-variant-numeric: tabular-nums;
+}
+.timer-bar .timer-note { font-size: 12.5px; color: #94a3b8; }
+.timer-bar.timer-urgent { background: #7f1d1d; }
+.timer-bar.timer-urgent .timer-value { color: #fecaca; }
+.timer-bar.timer-over .timer-value { color: #fca5a5; }
+
+/* ---- 题目状态卡片（真实系统：白底＝未提交，绿底＝已提交）---- */
+.pcard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 10px;
+}
+.pcard-item {
+  background: #fff;
+  border: 1px solid #d8dee6;
+  border-radius: 9px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.pcard-item.done { background: #dcfce7; border-color: #86efac; }
+.pcard-item .pcard-no { font-size: 12px; color: #64748b; }
+.pcard-item .pcard-slug {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 17px;
+  font-weight: 700;
+  color: #1f2933;
+}
+.pcard-item .pcard-meta { font-size: 12.5px; color: #475569; line-height: 1.5; }
+.pcard-item .pcard-meta b { font-weight: 500; color: #64748b; }
+.pcard-item .pcard-actions { display: flex; gap: 6px; margin-top: 8px; }
+.pcard-empty { color: #94a3b8; }
+
+/* ---- 交卷前检查清单 ---- */
+.checklist { list-style: none; margin: 0; padding: 0; }
+.checklist li {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 7px 0;
+  border-bottom: 1px dashed #e8ebee;
+  font-size: 14px;
+}
+.checklist li:last-child { border-bottom: 0; }
+.checklist .ck {
+  flex: 0 0 auto;
+  width: 17px; height: 17px;
+  margin-top: 3px;
+  border: 1.5px solid #94a3b8;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: #fff;
+}
+.checklist li.pass .ck { background: #16a34a; border-color: #16a34a; }
+.checklist li.fail .ck { background: #dc2626; border-color: #dc2626; }
+.checklist li.todo .ck { background: #fff; }
+.checklist .ck-note { color: #64748b; font-size: 13px; }
+
+/* ---- 命名红线提示（_ 与 - 、大小写、空格）---- */
+.rule-warn {
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 9px;
+  padding: 12px 15px;
+  margin: 10px 0;
+  font-size: 14px;
+}
+.rule-warn b { color: #92400e; }
+.rule-warn ul { margin: 6px 0 0 20px; }
+.rule-warn code {
+  background: #fef3c7;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+/* ---- 徽章：级别 / 模式 ---- */
+.tag-level { background: #e0e7ff; color: #3730a3; }
+.tag-full { background: #fee2e2; color: #991b1b; }
+.tag-train { background: #dcfce7; color: #166534; }
+
+/* ---- 个人信息文件卡 ---- */
+.me-card {
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 9px;
+  padding: 12px 15px;
+  margin: 10px 0;
+  font-size: 14px;
+}
+.me-card .me-name {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 15px;
+  font-weight: 700;
+  color: #075985;
+}
+
+/* ---- 宽表格：不折行，超出就让外层卡片横向滚动 ---- */
+table.nowrap th, table.nowrap td { white-space: nowrap; }
+
+/* ---- 可直接编辑的代码框（题面/标程）---- */
+textarea.codebox {
+  min-height: 260px;
+  font-family: ui-monospace, Consolas, "Microsoft YaHei", monospace;
+  font-size: 13.5px;
+  line-height: 1.62;
+  white-space: pre;
+  tab-size: 4;
+  resize: vertical;
+  background: #fcfdfe;
+}
+.codebox-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: #64748b;
+}
+.codebox-bar .ok { color: #15803d; }
+
+/* ---- 悬浮窗（预览用）---- */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(15, 23, 42, .45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.modal-mask[hidden] { display: none; }
+.modal-panel {
+  background: #f5f6f8;
+  border-radius: 12px;
+  width: min(980px, 100%);
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(15, 23, 42, .28);
+  overflow: hidden;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  background: #fff;
+  border-bottom: 1px solid #e3e6ea;
+  flex: 0 0 auto;
+}
+.modal-head h2 {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 16px;
+}
+.modal-head .modal-sub { font-size: 12.5px; color: #64748b; font-weight: 400; }
+.modal-body {
+  overflow: auto;
+  padding: 16px 18px 22px;
+  flex: 1 1 auto;
+}
+.modal-body .card:first-child { margin-top: 0; }
+.modal-close {
+  background: #eef2f7;
+  color: #334155;
+  border: 1px solid #d5dbe1;
+  border-radius: 7px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.modal-close:hover { background: #e2e8f0; }
+
+/* ---- 测试点明细（管理端看学生提交的每个点）---- */
+/* 可点的状态：保留下划线示意"点得动"，颜色沿用 ok/err */
+a.tp-open {
+  text-decoration: none;
+  border-bottom: 1px dashed currentColor;
+  cursor: pointer;
+}
+a.tp-open:hover { border-bottom-style: solid; }
+a.tp-open:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 3px; }
+.tp-strip {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 15px;
+  letter-spacing: 2px;
+  line-height: 1.2;
+}
+.tp-ok   { color: #16a34a; font-weight: 700; }
+.tp-wa   { color: #dc2626; font-weight: 700; }
+.tp-tle  { color: #d97706; font-weight: 700; }
+.tp-mle  { color: #7c3aed; font-weight: 700; }
+.tp-re   { color: #b91c1c; font-weight: 700; }
+.tp-na   { color: #cbd5e1; }
+.tp-legend { font-size: 12.5px; color: #64748b; }
+.tp-legend span { margin-right: 14px; white-space: nowrap; }
+
+table.tp-table { font-size: 13px; }
+table.tp-table th, table.tp-table td { padding: 5px 8px; }
+tr.tp-group td {
+  background: #f2f4f7;
+  font-size: 13px;
+  color: #334155;
+  border-bottom: 1px solid #dbe1e8;
+}
+tr.tp-group .tp-sub-score { float: right; font-weight: 600; }
+.tp-card {
+  border: 1px solid #e3e6ea;
+  border-radius: 9px;
+  padding: 12px 14px;
+  margin: 10px 0;
+  background: #fff;
+}
+.tp-card h3 { margin: 0 0 8px; font-size: 14.5px; }
+.tp-fail { background: #fef2f2; }
+.tp-pass { background: #f0fdf4; }
+

@@ -1,0 +1,77 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OI 模拟赛（试）</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/contest.css">
+</head><body>
+<div class="wrap"><h1>OI 模拟赛（试）</h1>
+
+<p class="muted">当前考号：<b>GD-J58437</b>（学生13） · <a href="contests.html">我的比赛</a> · <a href="help.html">考生须知</a> · <a href="index.html">退出</a></p>
+<p><span class="tag tag-oi">OI 赛制</span> <span class="tag tag-level">入门级 J 组</span> <span class="tag tag-train">训练模式</span>
+   <b>OI 模拟赛（试）</b><span class="muted"> · 赛中不看分数 · 按最后一次提交计分 · 赛后公布</span></p>
+
+<div class="timer-bar" id="timer-bar">
+  <span class="timer-label">距离考试结束</span>
+  <span class="timer-value" id="countdown">03:30:00</span>
+  <span class="timer-note">考试时长 3.5 小时（入门级）· 最后 30 分钟计时条会变红</span>
+</div>
+
+<h2>本场题目</h2>
+<div class="card" style="padding:12px 15px;margin-bottom:10px">
+  <b>题目编号是系统给的，照抄就行</b>
+  <span class="muted">——第 1 题叫 <code>T1</code>、第 2 题叫 <code>T2</code>，依次往下。
+  文件夹名和源文件名都用这个编号。</span>
+</div>
+<table>
+<tr><th>题号</th><th>题目编号</th><th>题目（点开看题面）</th><th>大样例</th><th>满分</th></tr>
+<tr><td>第 1 题</td><td><b>T1</b></td><td><a href="problem.html">A+B Problem</a></td><td><a class="btn btn-sm btn-gray" href="sample.html">下载大样例</a></td><td>100</td></tr>
+<tr><td>第 2 题</td><td><b>T2</b></td><td><a href="problem.html">求和</a></td><td><a class="btn btn-sm btn-gray" href="sample.html">下载大样例</a></td><td>100</td></tr>
+</table>
+
+<h2>提交我的文件</h2>
+<div class="card">
+<div class="tree">GD-J58437\                 ← 考号目录（文件夹名必须是你的考号）
+
+├── T1\
+│   └── T1.cpp            ← 第 1 题的代码
+└── T2\
+    └── T2.cpp            ← 第 2 题的代码</div>
+
+<div class="flash flash-info" style="margin-top:10px">
+  <b>本场是 OI 赛制，用标准输入输出</b>：程序里用 <code>cin</code>/<code>scanf</code> 读、<code>cout</code>/<code>printf</code> 写，
+  <b>不需要 freopen</b>（那是 CSP 赛制的要求）。文件夹只是用来区分每题的文件。
+</div>
+
+<form onsubmit="location.href='submitted.html';return false">
+<p style="margin-top:12px"><input type="file" webkitdirectory directory multiple
+          style="padding:10px;background:#f8fafc;border:1px dashed #94a3b8;border-radius:8px;width:100%"></p>
+<p class="muted">选<b>你考号那个文件夹</b>即可；也可以只选几个 <code>.cpp</code> 文件，或打包成 zip：
+  <input type="file" multiple accept=".cpp,.zip"></p>
+<p style="margin-top:12px"><button type="submit">提交我的代码</button>
+<span class="muted">交完会给你一份检查清单，逐条核对再离场</span></p>
+</form>
+</div>
+
+<h2>我的成绩</h2>
+<table>
+<tr><th>题号</th><th>题目编号</th><th>题目</th><th>我的成绩</th></tr>
+<tr><td>第 1 题</td><td><b>T1</b></td><td>A+B Problem</td><td><span class="err">答案错误</span></td></tr>
+<tr><td>第 2 题</td><td><b>T2</b></td><td>求和</td><td><span class="ok">答案正确</span></td></tr>
+</table>
+
+<div class="card">
+<b>本场是训练模式</b>
+<p class="muted" style="margin:6px 0 0">OI / CSP 赛制看不到具体分数（只有状态）；IOI 赛制会实时显示分数。
+   想体验真实考场的「零反馈」，让老师在管理端把本场切成<b>全真模式</b>。</p>
+</div>
+
+<p class="muted" style="margin-top:34px"><a href="../overview.html">← 原型页面总览</a> · CSP 训练站 · 评测由 Hydro 提供</p>
+</div>
+
+<script src="../assets/contest.js"></script>
+<script>
+/* 入门级 J 组 3.5 小时 = 12600 秒 */
+initCountdown(document.getElementById('countdown'),
+              document.getElementById('timer-bar'), 3.5 * 3600);
+</script>
+</body></html>

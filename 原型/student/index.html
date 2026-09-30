@@ -1,0 +1,22 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CSP 训练站 · 考试入口</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/contest.css">
+</head><body>
+<div class="wrap"><h1>CSP 训练站 · 考试入口</h1>
+
+<div class="card">
+<p class="muted">请使用老师发给你的<b>考试链接</b>进入；也可以直接输入考号（只在一场考试里出现时会自动进入）。</p>
+<form onsubmit="location.href='hall.html';return false">
+
+<input type="text" name="kaohao" placeholder="考号（如 GD-S10029）" autofocus
+       style="font-size:18px;letter-spacing:1px">
+<p style="margin-top:14px"><button type="submit">进入考试</button></p>
+</form>
+<p class="muted" style="margin-top:12px">考号格式：<code>GD-J</code> + 5 位随机数（入门级）、
+   <code>GD-S</code> + 5 位随机数（提高级）。注意是<b>半角减号</b>，不是下划线。</p>
+</div>
+<p class="muted"><a href="../admin/contests.html">管理端</a> · <a href="../overview.html">← 原型页面总览</a></p>
+<p class="muted" style="margin-top:34px">CSP 训练站 · 评测由 Hydro 提供</p>
+</div></body></html>

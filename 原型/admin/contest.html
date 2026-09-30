@@ -1,0 +1,183 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>管理端 · 2026年9月26日南山CC</title>
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/contest.css">
+</head><body>
+<div class="wrap"><h1>管理端 · 2026年9月26日南山CC</h1>
+
+<p class="muted">管理端 · <a href="contests.html">比赛列表</a> · <a href="contest.html">本场管理</a> · <a href="scores.html">成绩总表</a> · <a href="groups.html">名单分组</a> · <a href="problems.html">题目列表</a> · <a href="problem.html">新建题目</a> · <a href="problemset.html" target="_blank">导入题单文档</a> · <a href="../student/index.html" target="_blank">学生端入口</a> · <a href="../overview.html">原型总览</a></p>
+
+<p><span class="tag tag-csp">CSP 赛制</span> <span class="tag tag-level">提高级 S 组</span> <span class="tag tag-full">全真模式</span> <b>2026年9月26日南山CC</b></p>
+<p><b>本场学生入口</b>（发这个链接给学生，他们输入自己的考号）：
+  <code>http://<你的服务器IP>:8080/enter?c=c4</code>
+  <br><span class="muted">考号是按场次随机发的，每次进考场都得用本场链接；
+  学生自己不用挑考场，从链接进来就直达本场。</span></p>
+
+<div class="kv card">
+  <div><b>赛制</b>CSP 赛制</div>
+  <div><b>级别</b>提高级 S 组</div>
+  <div><b>时长</b>240 分钟</div>
+  <div><b>名单</b>8 人</div>
+  <div><b>已提交</b>1 人</div>
+  <div><b>提交开关</b>开放</div>
+  <div><b>反馈模式</b>全真（赛中零反馈）</div>
+  <div><b>成绩</b>未公布</div>
+</div>
+<p class="muted">CSP-J/S 复赛风格：提交以<b>考号命名</b>的文件夹，里面按<b>系统自动生成的题目编号</b>建子文件夹，代码必须用 freopen 读写 <code>&lt;编号&gt;.in</code> / <code>&lt;编号&gt;.out</code>；文件夹名或 freopen 文件名写错，这题就是 0 分。赛时不显示分数，赛后老师公布。</p>
+<p><a class="btn" href="scores.html">成绩总表</a>
+  <button type="button">公布成绩</button>
+  <button type="button" class="btn-gray">关闭提交</button>
+</p>
+
+<h2>本场设置</h2>
+<div class="card">
+<form onsubmit="return false">
+<div class="row">
+  <span>级别</span>
+  <select name="level" style="width:200px">
+    <option value="J">入门级 J 组（GD-J，3.5 小时）</option>
+    <option value="S" selected>提高级 S 组（GD-S，4 小时）</option>
+  </select>
+  <span>时长</span><input type="text" name="duration" value="240" style="width:70px"> 分钟
+  <span>考号前缀</span><input type="text" name="prefix" value="GD" style="width:70px">
+</div>
+<p style="margin-top:12px"><b>反馈模式</b></p>
+<div class="row">
+  <label><input type="radio" name="mode" value="full" checked style="width:auto"> <b>全真模式</b>：赛中零反馈，交完只显示「已提交」，与真实 CSP 第二轮一致</label>
+  <label><input type="radio" name="mode" value="train" style="width:auto"> 训练模式：交完即判分，学生能看到状态（适合平时练习）</label>
+</div>
+<p class="muted" style="margin-top:10px">改级别会重新生成本场考号（<b>已有学生提交后不允许改</b>，否则成绩会对错人）。
+   反馈模式随时可切，全真模式更贴近考场、训练模式更适合边练边讲。</p>
+<p style="margin-top:12px"><button type="submit">保存本场设置</button></p>
+</form>
+</div>
+
+<div class="rule-warn">
+  <b>广东考区固定要求（本场已按此执行）</b>
+  <ul>
+    <li>考号格式 <code>GD-S</code> + 5 位随机数（提高级）／<code>GD-J</code> + 5 位随机数（入门级）</li>
+    <li>学生要交个人信息文件（文件名＝学生姓名，内容含姓名/性别/年级/地区/学校/辅导老师/提交的程序）</li>
+    <li>目录结构：考号目录 → 题目编号子目录 → 题目编号.cpp</li>
+    <li>命名严格区分大小写，<code>_</code> 与 <code>-</code> 不可混用，文件夹名不得有空格</li>
+  </ul>
+</div>
+
+<h2>1. 名单与考号（每场考试纯随机发号）</h2>
+<div class="card">
+<p><a class="btn btn-sm btn-gray" href="groups.html">管理名单分组</a>
+   <a class="btn btn-sm btn-gray" href="print.html" target="_blank">考号表（打印发给学生）</a>
+</p>
+<form onsubmit="return false">
+<p style="margin-top:12px"><b>① 从分组导入</b>（分组可以反复用于不同考试，考号每场重新发）：</p>
+<div class="row">
+  <select name="gid" style="width:280px">
+    <option value="">— 不用分组，用下面的粘贴名单 —</option>
+    <option value="g1">南山18:30（8 人）</option>
+  </select>
+  <span>考号前缀 <input type="text" name="prefix"
+     value="GD"
+     style="width:80px;display:inline-block"></span>
+</div>
+<p style="margin-top:12px"><b>② 或者临时粘贴名单</b>（每行一个姓名，也可从 Excel 整列粘贴）：</p>
+<textarea name="names" placeholder="张三&#10;学生17&#10;王五" style="min-height:110px"></textarea>
+<div class="row" style="margin-top:12px">
+  <label><input type="radio" name="mode" value="append" checked style="width:auto"> 追加到本场（已有学生保持原考号）</label>
+  <label><input type="radio" name="mode" value="replace" style="width:auto"> 重建本场名单（清空后全部重发考号）</label>
+</div>
+<p style="margin-top:12px"><button type="submit">导入并生成考号</button></p>
+<p class="muted">考号的数字部分是<b>纯随机数</b>（5 位，如 <code>GD-S10029</code>），不是从 1 开始顺着排的：
+  和学生姓名、名单顺序、机位、上一场都毫无关系，学生猜不到别人的号；同一场里不会重号，不同场次各发各的。
+导入后会在评测站为每个考号建好账号（学生本人不需要注册登录）。</p>
+</form>
+</div>
+
+<div class="card" style="overflow:auto">
+<h2 style="margin-top:0">本场名单（8 人）<span class="muted"> 考号纯随机，发下去之前建议点开「考号表」核对</span></h2>
+<table>
+<tr><th>考号</th><th>姓名</th><th>评测站密码</th><th>账号</th><th>提交</th></tr>
+<tr><td>GD-S10025</td><td>学生09</td><td class="muted">hPXAHOJ3</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10026</td><td>学生10</td><td class="muted">PflVbFGH</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10027</td><td>学生11</td><td class="muted">ul44nRgb</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10028</td><td>学生12</td><td class="muted">6gr9YNea</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10029</td><td>学生13</td><td class="muted">示例密码</td><td>已建</td><td>已提交</td></tr>
+<tr><td>GD-S10030</td><td>学生14</td><td class="muted">WzXbPrUS</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10031</td><td>学生15</td><td class="muted">B1Ay4LW6</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10032</td><td>学生16</td><td class="muted">nYzDHRua</td><td>未建</td><td>—</td></tr>
+</table>
+<form style="margin-top:10px"><button type="button" class="btn-gray">提前建好本场 7 个账号</button><span class="muted"> 不点也没关系：学生第一次提交时会自动建（每个账号要启动一次评测站进程，所以后台串行创建，慢一点但不会拖垮服务器）</span></form>
+</div>
+
+<h2>2. 本场题目</h2>
+<div class="card">
+<div class="me-card">
+  <b>题目编号不用填，系统按顺序自动生成</b><br>
+  第 1 题 → <b>T1</b>、第 2 题 → <b>T2</b>、第 3 题 → <b>T3</b>⋯⋯
+  它就是学生要建的文件夹名、源文件名和 freopen 的文件名（<code>T1/T1.cpp</code>、<code>T1.in</code> / <code>T1.out</code>）。
+  <br><span class="muted">题目本身由系统分配身份，老师选题时按<b>标题</b>找就行，不需要记任何标识。</span>
+</div>
+<table>
+<tr><th>题号</th><th>题目编号</th><th>题目</th><th>选手读写的文件</th><th>满分</th></tr>
+<tr><td>第 1 题</td><td><b>T1</b></td><td>每件只买一次</td><td>T1.in / T1.out</td><td>100</td></tr>
+<tr><td>第 2 题</td><td><b>T2</b></td><td>网格前 K 大数之和</td><td>T2.in / T2.out</td><td>100</td></tr>
+<tr><td>第 3 题</td><td><b>T3</b></td><td>跳跃最短路</td><td>T3.in / T3.out</td><td>100</td></tr>
+</table>
+<form style="margin-top:14px" onsubmit="return false">
+<p>在下面搜索题库里的题目，点一下加进来；<b>加进来的顺序就是第 1、2、3… 题</b>，编号随之自动生成，加进来后可以上下移动。
+  搜不到想要的题？<a href="problem.html">去新建一道（选出题文件夹，自动识别）→</a></p>
+<p class="csp-picker">
+  <input type="text" autocomplete="off" placeholder="输入标题搜索，例如 糖果分配 / A+B">
+  <button type="button" class="btn-gray">刷新题库</button>
+</p>
+<div class="csp-catalog muted">
+  <button type="button" class="csp-cat-item">每件只买一次</button>
+  <button type="button" class="csp-cat-item">网格前 K 大数之和</button>
+  <button type="button" class="csp-cat-item">跳跃最短路</button>
+  <button type="button" class="csp-cat-item">A+B Problem</button>
+  <button type="button" class="csp-cat-item">求和</button>
+  <button type="button" class="csp-cat-item">奇数个1的子串</button>
+</div>
+<div>
+  <div class="csp-picked-row">
+    <span class="muted">第 1 题</span>
+    <span class="muted">→ 编号</span> <code>T1</code>
+    <span>每件只买一次</span>
+    <button type="button" class="btn btn-sm btn-gray">↑</button><button type="button" class="btn btn-sm btn-gray">↓</button><button type="button" class="btn btn-sm btn-danger">移除</button>
+  </div>
+  <div class="csp-picked-row">
+    <span class="muted">第 2 题</span>
+    <span class="muted">→ 编号</span> <code>T2</code>
+    <span>网格前 K 大数之和</span>
+    <button type="button" class="btn btn-sm btn-gray">↑</button><button type="button" class="btn btn-sm btn-gray">↓</button><button type="button" class="btn btn-sm btn-danger">移除</button>
+  </div>
+  <div class="csp-picked-row">
+    <span class="muted">第 3 题</span>
+    <span class="muted">→ 编号</span> <code>T3</code>
+    <span>跳跃最短路</span>
+    <button type="button" class="btn btn-sm btn-gray">↑</button><button type="button" class="btn btn-sm btn-gray">↓</button><button type="button" class="btn btn-sm btn-danger">移除</button>
+  </div>
+</div>
+<p style="margin-top:10px">每题满分 <input type="text" name="full"
+   value="100"
+   style="width:80px;display:inline-block"></p>
+<p style="margin-top:12px"><button type="submit">保存题目</button></p>
+</form>
+</div>
+
+<h2>3. 名单与密码</h2>
+<div class="card" style="overflow:auto">
+<table>
+<tr><th>考号</th><th>姓名</th><th>评测站密码</th><th>站点账号</th><th>提交状态</th></tr>
+<tr><td>GD-S10025</td><td>学生09</td><td class="muted">hPXAHOJ3</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10026</td><td>学生10</td><td class="muted">PflVbFGH</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10027</td><td>学生11</td><td class="muted">ul44nRgb</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10028</td><td>学生12</td><td class="muted">6gr9YNea</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10029</td><td>学生13</td><td class="muted">示例密码</td><td>已建</td><td>已提交</td></tr>
+<tr><td>GD-S10030</td><td>学生14</td><td class="muted">WzXbPrUS</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10031</td><td>学生15</td><td class="muted">B1Ay4LW6</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S10032</td><td>学生16</td><td class="muted">nYzDHRua</td><td>未建</td><td>—</td></tr>
+</table>
+</div>
+
+<p class="muted" style="margin-top:34px"><a href="../overview.html">← 原型页面总览</a> · CSP 训练站 · 评测由 Hydro 提供</p>
+</div></body></html>

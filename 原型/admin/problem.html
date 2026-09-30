@@ -1,0 +1,341 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>新建题目</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/style.css">
+<link rel="stylesheet" href="../assets/contest.css">
+</head><body>
+<div class="wrap"><h1>新建题目</h1>
+
+<p class="muted">管理端 · <a href="contests.html">比赛列表</a> · <a href="groups.html">名单分组</a> · <a href="problems.html">题目列表</a> · <a href="problem.html">新建题目</a> · <a href="problemset.html" target="_blank">导入题单文档</a> · <a href="../student/index.html" target="_blank">学生端入口</a> · <a href="../overview.html">原型总览</a></p>
+<p><a class="btn btn-gray" href="contests.html">← 比赛列表</a></p>
+
+<h2>新建题目</h2>
+<div class="card">
+<form enctype="multipart/form-data" onsubmit="return false">
+
+<p style="margin-top:0"><b>① 选出题文件夹</b>（选整个文件夹，或打包好的 zip）</p>
+<p><input type="file" webkitdirectory directory multiple
+        style="padding:10px;background:#f0f9ff;border:1px dashed #38bdf8;border-radius:8px;width:100%"></p>
+<p class="muted">也可以只传一个 zip：<input type="file" accept=".zip"></p>
+<p class="muted">选完之后系统会<b>自动识别结构并把下面的内容填好</b>，你核对一遍、按需改几处就行。
+文件夹里有多道题时会全部导入。</p>
+
+<div class="flash flash-ok" style="margin-top:12px">
+  已识别出 <b>1 道题</b>，下面的内容都已自动填好 —— 直接改就行。
+</div>
+
+<div class="card" style="background:#f8fafc;margin-top:0">
+  <b>识别到的内容</b>
+  <table style="margin-top:8px">
+  <tr><th>内容</th><th>来源</th><th>识别结果</th></tr>
+  <tr><td>题面</td><td class="muted">题目.md</td><td><span class="ok">✓ 已读入</span></td></tr>
+  <tr><td>标程</td><td class="muted">标程.cpp</td><td><span class="ok">✓ 已找到</span></td></tr>
+  <tr><td>测试数据</td><td class="muted">data/01.in 01.out …</td><td><span class="ok">✓ 20 组</span></td></tr>
+  <tr><td>大样例</td><td class="muted">大样例/大样例.in .out</td><td><span class="ok">✓ 1 组</span></td></tr>
+  <tr><td>题目样例</td><td class="muted">data/样例1.in .out</td><td><span class="muted">已忽略（不参与评测）</span></td></tr>
+  <tr><td>出题附属文件</td><td class="muted">暴力.cpp / 生成器.py / *.exe</td><td><span class="muted">已忽略</span></td></tr>
+  </table>
+  <p class="muted" style="margin-bottom:0">题目标识由系统分配，不用填；题目编号可以自己定（见下面 ②）。</p>
+</div>
+
+<p style="margin-top:14px"><b>② 标题</b> <span class="muted">（已从文件夹名读出，可改）</span></p>
+<input type="text" value="每件只买一次">
+
+<div class="row" style="margin-top:12px">
+  <span><b>题目编号</b></span>
+  <input type="text" id="new-code" placeholder="留空则按系统规范自动分配" style="width:230px">
+  <span class="muted">想改可以改成别的（如 <code>candy</code>）；留空就按规范给（<code>T1</code>、<code>T2</code>…）</span>
+</div>
+<p class="muted" style="margin:4px 0 0">
+  这个编号就是学生要用来建文件夹、命名源文件、写 <code>freopen</code> 的名字，建完不再变。
+</p>
+
+<div class="row" style="margin-top:12px">
+  <span>时限(毫秒)</span><input type="text" value="1000" style="width:90px">
+  <span>内存(MB)</span><input type="text" value="256" style="width:80px">
+</div>
+
+<p style="margin-top:14px">
+  <b>③ 题面</b> <span class="muted">（已从 题目.md 读入，可直接改；Markdown，支持 $…$ 公式）</span>
+  <button type="button" class="btn btn-sm btn-gray" id="pv-toggle" style="margin-left:6px">预览</button>
+  <span class="muted" id="pv-hint">　在独立窗口里看学生打开题面时的样子（改题面会实时更新）</span>
+</p>
+<textarea id="stmt-src" style="min-height:220px"># 每件只买一次
+
+商店里有 $N$ 种商品。你需要将每种商品**恰好购买一次**，不能重复购买同一种商品，购买顺序可以自行安排。
+
+第 $i$ 种商品有两种购买方式：
+
+- 不使用优惠券，支付 $A_i$ 元购买，并获得一张优惠券。
+- 使用一张优惠券，支付 $B_i$ 元购买。这张优惠券会被消耗，且本次购买**不会获得新的优惠券**。
+
+优惠券可以用于任意一种尚未购买的商品，也可以积累后再使用。开始时，你没有优惠券。
+
+请问购买全部 $N$ 种商品的最少总花费是多少？购买结束后允许有剩余优惠券。
+
+共有 $T$ 组测试数据，请分别求解。
+
+## 输入格式
+
+第一行输入一个整数 $T$，表示测试数据的组数。
+
+对于每组测试数据：
+
+- 第一行输入一个整数 $N$，表示商品种类数。
+- 接下来 $N$ 行，每行输入两个整数 $A_i,B_i$，分别表示第 $i$ 种商品的原价和用券后的价格。
+
+## 输出格式
+
+对于每组测试数据，输出一行一个整数，表示最少总花费。
+
+## 样例 1
+
+### 输入
+
+    2
+    5
+    11 6
+    6 5
+    2 1
+    8 3
+    7 4
+
+### 输出
+
+    24
+
+## 数据范围
+
+对于所有数据：
+
+- $1\le T\le2\times10^5$；
+- $1\le N\le2\times10^5$；
+- $1\le B_i&lt;A_i\le10^9$。
+
+| 子任务 | 分值 | 测试点 | 附加限制 |
+| --- | --- | --- | --- |
+| 1 | 20 | 01 ~ 04 | $N\le8$ |
+| 2 | 20 | 05 ~ 08 | $N\le12$ |
+| 3 | 20 | 09 ~ 12 | $N\le500$ |
+| 4 | 40 | 13 ~ 20 | 无 |
+
+时间限制：2 秒。空间限制：256 MiB。
+
+> 提示：大样例见题目目录下的 `大样例/大样例.in` 与 `.out`。</textarea>
+
+<p style="margin-top:14px">
+  <b>④ 标程</b> <span class="muted">（已识别到 <code>标程.cpp</code>，内容已填进下面的框；可以直接看、直接改）</span>
+</p>
+<div class="codebox-bar">
+  <span><span class="ok">✓</span> 标程.cpp · <span id="std-count">—</span> · 已识别</span>
+  <span>建题后拿它自测一遍，能立刻看出数据或时限有没有问题</span>
+</div>
+<textarea class="codebox" id="std-src" spellcheck="false">#include &lt;bits/stdc++.h&gt;
+using namespace std;
+using ll = long long;
+
+int main() {
+    int T;
+    if (scanf("%d", &amp;T) != 1) return 0;
+
+    while (T--) {
+        int n;
+        scanf("%d", &amp;n);
+
+        // 每件商品记下「原价 - 用券价」和「用券价」
+        vector&lt;pair&lt;ll, ll&gt;&gt; item(n);
+        for (int i = 0; i &lt; n; ++i) {
+            ll a, b;
+            scanf("%lld %lld", &amp;a, &amp;b);
+            item[i] = {a - b, b};
+        }
+
+        // 差值小的适合原价买（顺便攒券），差值大的适合用券买（省得多）
+        sort(item.begin(), item.end());
+
+        // 用券买了 k 件，就必须先原价买至少 k 件攒够券，所以原价买的至少 ceil(n/2) 件
+        int full = (n + 1) / 2;
+
+        ll ans = 0;
+        for (int i = 0; i &lt; n; ++i) {
+            if (i &lt; full) ans += item[i].first + item[i].second;  // 原价买：付 A = (A-B) + B
+            else          ans += item[i].second;                   // 用券买：付 B
+        }
+        printf("%lld\n", ans);
+    }
+    return 0;
+}</textarea>
+
+<p style="margin-top:14px"><b>⑤ 大样例</b> <span class="muted">（已从 大样例/ 收进来，学生可在考试页下载）</span></p>
+<p><input type="file" multiple
+        style="padding:8px;background:#fffbeb;border:1px dashed #f59e0b;border-radius:8px;width:100%"></p>
+<p class="muted">大样例只给学生本机调试用，<b>不参与评测、不影响分数</b>。</p>
+
+<div class="row" style="margin-top:12px">
+  <label><input type="checkbox" checked style="width:auto">
+    导入后拿上面的标程自测一遍（推荐，能立刻看出数据或时限有没有问题）</label>
+</div>
+<div class="row" style="margin-top:8px">
+  <label><input type="checkbox" style="width:auto">
+    覆盖同名题目</label>
+</div>
+
+<p style="margin-top:14px"><button type="submit">建题并导入评测站</button></p>
+<p class="muted">导入后这道题立刻可以加进比赛：到比赛页「本场题目」里搜索即可。
+文件较大时上传+导入需要十几秒，请耐心等页面跳转。</p>
+</form>
+</div>
+
+<details class="csp-manual" style="margin-top:22px">
+  <summary>给已建好的题目补大样例</summary>
+  <div class="card">
+    <form enctype="multipart/form-data" onsubmit="return false">
+      <div class="row">
+        <span>题目</span>
+        <select style="width:280px">
+          <option>每件只买一次</option>
+          <option>网格前 K 大数之和</option>
+          <option>跳跃最短路</option>
+        </select>
+        <input type="file" multiple style="flex:1">
+        <button type="submit">保存大样例</button>
+      </div>
+      <p class="muted">按 <code>大样例.in</code> + <code>大样例.out</code>（或 <code>.ans</code>）配对；
+        也可以只传一个文件。<b>会替换这道题已有的大样例</b>，学生随后就能在考试页下载。</p>
+    </form>
+  </div>
+</details>
+
+<p class="muted" style="margin-top:34px"><a href="../overview.html">← 原型页面总览</a> · CSP 训练站 · 评测由 Hydro 提供</p>
+</div>
+
+<!-- ============ 题面预览：悬浮窗 ============ -->
+<div class="modal-mask" id="pv-modal" hidden>
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-label="题面预览">
+    <div class="modal-head">
+      <h2>题面预览 <span class="modal-sub">· 学生在考试页看到的样子</span></h2>
+      <button type="button" class="modal-close" id="pv-close">关闭（Esc）</button>
+    </div>
+    <div class="modal-body">
+      <div class="card">
+        <p class="muted" style="margin-top:0">
+          考号 <b>GD-S10029</b>（示例学生） · 返回比赛 · 下载大样例 · 退出
+        </p>
+        <p><span class="tag tag-csp">CSP 赛制</span> <span class="tag tag-level">提高级 S 组</span></p>
+        <h2>第 <span id="pv-no">1</span> 题 · <code id="pv-code">T1</code><span class="muted" id="pv-sub"> 每件只买一次 · 满分 100</span></h2>
+        <p class="muted" style="margin-top:-6px" id="pv-codenote">
+          编号 <code>T1</code> 是系统按规范分配的（<b>留空时</b>）；你在 ② 里填了就用你填的。
+          学生用它建文件夹 <code>GD-S10029/T1/</code>、命名源文件 <code>T1.cpp</code>、写 <code>freopen("T1.in")</code>。
+        </p>
+
+        <div class="card stmt" id="pv-body"></div>
+      </div>
+      <p class="muted">预览只渲染题面。时限/内存、测试数据、大样例这些在表单里改，建题时会一起带过去。</p>
+    </div>
+  </div>
+</div>
+
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/auto-render.min.js"></script>
+<script src="../assets/md.js"></script>
+<script>
+/* ---- 题面预览：单独开一个悬浮窗，按学生看到的样子渲染 ---- */
+(function () {
+  var src = document.getElementById('stmt-src');
+  var modal = document.getElementById('pv-modal');
+  var body = document.getElementById('pv-body');
+  var openBtn = document.getElementById('pv-toggle');
+  var closeBtn = document.getElementById('pv-close');
+  var hint = document.getElementById('pv-hint');
+  var title = document.querySelector('input[type=text]');   // ② 标题
+  var codeEl = document.getElementById('new-code');          // ② 题目编号（可留空）
+  var timer = null;
+
+  /* 编号：填了用填的，留空用系统规范给的示例（T1） */
+  function currentCode() {
+    var v = (codeEl && codeEl.value || '').trim();
+    return v || 'T1';
+  }
+
+  function syncHead() {
+    var t = (title && title.value || '').trim() || '（未填标题）';
+    var sub = document.getElementById('pv-sub');
+    if (sub) sub.textContent = ' ' + t + ' · 满分 100';
+
+    var code = currentCode();
+    document.getElementById('pv-code').textContent = code;
+    var auto = !(codeEl && codeEl.value.trim());
+    document.getElementById('pv-codenote').innerHTML =
+      '编号 <code>' + code + '</code> ' +
+      (auto ? '是系统按规范分配的（<b>因为你留空了</b>）；填上就按你填的来。'
+            : '是你自己填的；留空的话系统会按规范分配。') +
+      ' 学生用它建文件夹 <code>GD-S10029/' + code + '/</code>、命名源文件 <code>' + code +
+      '.cpp</code>、写 <code>freopen("' + code + '.in")</code>。';
+  }
+
+  function draw() {
+    renderStatementInto(body, src.value);
+    syncHead();
+  }
+
+  function open() {
+    modal.hidden = false;
+    document.body.style.overflow = 'hidden';   // 背景不跟着滚
+    draw();
+    hint.textContent = '　预览窗口已打开，改题面会实时更新';
+    closeBtn.focus();
+  }
+
+  function close() {
+    modal.hidden = true;
+    document.body.style.overflow = '';
+    hint.textContent = '　在独立窗口里看学生打开题面时的样子（改题面会实时更新）';
+  }
+
+  openBtn.addEventListener('click', open);
+  closeBtn.addEventListener('click', close);
+
+  // 点遮罩空白处关闭（点面板本身不关）
+  modal.addEventListener('click', function (e) { if (e.target === modal) close(); });
+
+  // Esc 关闭
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !modal.hidden) close();
+  });
+
+  // 预览开着的时候，改题面 / 改标题 / 改编号都实时刷新
+  src.addEventListener('input', function () {
+    if (modal.hidden) return;
+    clearTimeout(timer);
+    timer = setTimeout(draw, 250);
+  });
+  if (title) title.addEventListener('input', function () { if (!modal.hidden) syncHead(); });
+  if (codeEl) codeEl.addEventListener('input', function () { if (!modal.hidden) syncHead(); });
+})();
+
+/* ---- 标程框：实时显示行数（老师改完一眼看到改了多少） ---- */
+(function () {
+  var std = document.getElementById('std-src');
+  var count = document.getElementById('std-count');
+  if (!std || !count) return;
+  function refresh() {
+    var v = std.value;
+    var lines = v ? v.split('\n').length : 0;
+    count.textContent = lines + ' 行 · ' + v.length + ' 字符';
+  }
+  std.addEventListener('input', refresh);
+  refresh();
+
+  // Tab 键插入 4 个空格，不在框里跳走焦点
+  std.addEventListener('keydown', function (e) {
+    if (e.key !== 'Tab') return;
+    e.preventDefault();
+    var s = this.selectionStart, t = this.selectionEnd;
+    this.value = this.value.slice(0, s) + '    ' + this.value.slice(t);
+    this.selectionStart = this.selectionEnd = s + 4;
+    refresh();
+  });
+})();
+</script>
+</body></html>
