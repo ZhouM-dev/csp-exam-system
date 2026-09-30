@@ -28,6 +28,11 @@ _DOC_NAMES = "题目单导入接口.md"
 _DOC_CANDIDATES = [os.path.join(PKG_DIR, _DOC_NAMES), os.path.join(ROOT_DIR, _DOC_NAMES)]
 PS_DOC = next((p for p in _DOC_CANDIDATES if os.path.isfile(p)), _DOC_CANDIDATES[0])
 
+#: 考生须知：考区官方通告的原文（`/help` 会把这份 Markdown 渲染成整页）。
+#: 每年考区通告不一样，换考区/换年份就换这一份文件，代码不用动。
+#: 文件缺失时 `/help` 只给「以考点发的纸质通告为准」加原文链接，不会 500。
+NOTICE_DOC = os.path.join(PKG_DIR, "notice_guangdong.md")
+
 #: 服务端口
 PORT = int(os.environ.get("CSP_EXAM_PORT", "8080"))
 #: 学生会话 cookie 名（管理端 cookie 名在 core/security.py）

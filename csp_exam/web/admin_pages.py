@@ -1295,7 +1295,7 @@ class AdminPages:
         level = store.level_of(contest)
         minutes = store.duration_of(contest)
         hours = f"{minutes / 60:g} 小时"
-        # 发给学生时的提醒清单（广东考区规则；文案与「考生须知」保持一致）
+        # 发给学生时的提醒清单（广东考区规则；文案与考区通告 notice_guangdong.md 对齐）
         # 本场的题目英文名（学生要用的文件夹名）——从 exam.json 里读，别写死举例
         gnames = [store.code_of(p) for p in store.load_exam(cid).get("problems", [])]
         gname_tip = ("、".join(f"<code>{html.escape(x)}</code>" for x in gnames[:3])

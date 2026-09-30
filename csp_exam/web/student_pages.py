@@ -33,7 +33,7 @@ from ..core import grading, hydro_client as hydro, store, wrapper
 from ..core.security import make_cookie
 from ..core import problems as make_problem
 from ..core.util import log, _fmt_bytes
-from ..config import MAX_UPLOAD
+from ..config import MAX_UPLOAD, NOTICE_DOC
 from .multipart import _read_zip
 from .urls import cid_query
 from .ui import code_pre, decode_text, looks_binary
@@ -364,16 +364,6 @@ class StudentPages:
                 f'姓名、性别、年级、地区、学校、辅导老师、提交的程序。<br>'
                 f'{want}<span class="muted">（这个文件不计分，但广东考区要求必须有）</span></div>')
 
-    def _code_card(self, exam: dict) -> str:
-        """题目英文名说明卡：每题表里都写着，照抄（原型里比赛页与考生须知都有这一块）。"""
-        pairs = "、".join(f"第 {p['no']} 题 → <code>{html.escape(store.code_of(p))}</code>"
-                          for p in exam.get("problems", [])[:4])
-        return ('<div class="me-card"><b>每题的名字（英文名）在题目表里写着，照抄就行</b><br>'
-                f'{pairs or "第 1 题 → <code>candy</code>"}，依次往下——题目表里每题都标着。<br>'
-                '<span class="muted">文件夹名、源文件名、freopen 的文件名，三处都用同一个名字；'
-                '大小写也要一致。</span>'
-                '</div>')
-
     def _submit_block(self, exam: dict, contest: dict, cid: str, kaohao: str, name: str) -> str:
         """提交区：三种赛制**统一**交考号文件夹（上传文件夹或 zip），不再有逐题提交按钮。
 
@@ -529,10 +519,17 @@ class StudentPages:
         self._send(page("已提交", body))
 
     def _help_page(self, cid: str = ""):
-        """考生须知（照原型 `student/help.html`）。
+        """考生须知：整页就是**考区官方通告的原文**（`config.NOTICE_DOC` 那份 Markdown）。
 
-        一页讲完"爆零三件套"的防法：考号格式、目录结构、个人信息文件、命名红线、
-        怎么算分（按点给分不捆绑）、编译环境、考场纪律、考试期间能看到什么。
+        通告跟着考区、年份变，所以通篇内容都在那个 Markdown 文件里 —— 换一年换一份
+        文件就行，页面代码不掺任何口径。文件缺失时只给一句「以考点下发的纸质通告为准」
+        加原文链接，不会 500。
+
+        通告之后附「本场信息」：考号、目录树、个人信息文件名、提交方式。这几项是
+        **本平台按这一位学生算出来的**，通告里只有 GD-S00001／张三 那种通用示例，
+        所以不能拿通告顶掉。通告本身讲清楚的（目录结构、命名红线、输入输出、
+        NOI Linux 编译坑、考场纪律）页面不再重复。
+
         未登录也能看（考前先读一遍），会话属于本场时导航里带上考号姓名。
         """
         session = self._session()
@@ -557,129 +554,47 @@ class StudentPages:
         tree_name = name if name and name != "?" else ""
         # 本场应提交的个人信息文件名（不知道姓名时只给个示意）
         person_name = f"{html.escape(name)}.txt" if name and name != "?" else "你的名字.txt"
-
         score_text = "已公布" if exam.get("released") else "赛中不显示，赛后由老师公布"
         nav = (self._nav(kaohao, cid, name=name) if kaohao else
                f'<p class="muted"><a href="/enter?c={urllib.parse.quote(cid)}">考试入口</a>'
                f' · <a href="/">首页</a> · <a href="/contests">我的比赛</a></p>')
-        samples = {"J": "58437", "S": "48213"}
-        lv_rows = "".join(
-            f'<tr><td>{html.escape(store.level_name(lv))}</td>'
-            f'<td>{html.escape(_dur_text(store.LEVEL_MINUTES.get(lv, 0)))}</td>'
-            f'<td><code>{html.escape(prefix)}-{lv}</code> + {store.DEFAULT_WIDTH} 位随机数，'
-            f'如 <code>{html.escape(prefix)}-{lv}{samples.get(lv, "00000")}</code></td></tr>'
-            for lv in ("J", "S"))
-        io_rule = ("<b>均为文件</b>：用 <code>freopen</code> 打开本题编号对应的 "
-                   "<code>&lt;编号&gt;.in</code> / <code>&lt;编号&gt;.out</code>，"
-                   "读写都在当前路径下（不带绝对路径）"
-                   if rule.get("freopen") else
-                   "标准输入输出（<code>cin</code>/<code>cout</code>、<code>scanf</code>/"
-                   "<code>printf</code>），<b>不需要 freopen</b>")
-        score_block = (
-            '<p>考试期间<b>不显示任何判分信息</b>，成绩由老师在考试结束后统一公布，'
-            '与真实考场一致：</p>'
-            '<table><tr><th>会看到</th><th>不会看到</th></tr>'
-            '<tr><td>距离考试结束的倒计时</td><td>编译信息</td></tr>'
-            '<tr><td>每题「已提交 / 未提交」的状态</td><td>测试点通过情况</td></tr>'
-            '<tr><td>你交上去的文件（点开核对）</td><td>任何分数（连"部分正确"都没有）</td></tr>'
-            '</table><p class="muted" style="margin-bottom:0">所以交之前一定自己核对：'
-            '<b>文件名、目录位置、freopen 的文件名</b>。真实考场里，这些错了没人会提醒你。</p>')
-        body = f"""{nav}
-{self._flash('info', '开考前请先读完这一页。')}
-<p class="muted" style="margin-top:-4px">真实 CSP-J/S 第二轮的很多"爆零"不是算法问题，
-而是<b>文件名写错、目录放错、忘了 freopen</b>。</p>
 
-<h2>一、比赛安排</h2>
+        if os.path.isfile(NOTICE_DOC):
+            notice_html = ('<div class="card stmt" style="overflow:auto">'
+                           + md_to_html(open(NOTICE_DOC, encoding="utf-8").read())
+                           + '</div>')
+        else:
+            notice_html = (
+                '<div class="card"><p class="muted" style="margin-bottom:0">'
+                '本机没有放考区通告原文（<code>notice_guangdong.md</code> 缺失），'
+                '请以考点下发的纸质通告为准，原文见 '
+                '<a href="https://www.noi.cn/gs/xw/gd/" target="_blank">NOI 官网 · 广东</a>。'
+                '</p></div>')
+
+        body = f"""{nav}
+{self._flash('info', '开考前请先读完这一页：下面是考区官方通告的原文。')}
+
+{notice_html}
+
+<h2>附：本场信息</h2>
 <div class="card">
 <div class="kv">
+  <div><b>你的考号</b>{html.escape(kaohao) if kaohao else "（还没登录，登录后这里显示你自己的号）"}</div>
+  <div><b>个人信息文件</b>本场应提交 <code>{person_name}</code></div>
   <div><b>赛制</b>{rule_badge(contest)} {html.escape(store.level_name(level))}</div>
-  <div><b>时长</b>{html.escape(_dur_text(minutes))}</div>
-  <div><b>满分</b>{total} 分（{len(probs)} 题）</div>
+  <div><b>时长 / 满分</b>{html.escape(_dur_text(minutes))} / {total} 分（{len(probs)} 题）</div>
   <div><b>提交方式</b>{html.escape(store.SUBMIT_UPLOAD_NOTE)}</div>
   <div><b>成绩</b>{html.escape(score_text)}</div>
 </div>
-<table style="margin-top:12px">
-<tr><th>级别</th><th>考试时长</th><th>考号格式</th></tr>
-{lv_rows}
-</table>
-<p class="muted" style="margin-top:8px">考号请以准考证为准（<b>不是机号</b>）。认证开始 15 分钟后禁止入场。<br>
-   5 位数字是<b>纯随机数</b>，不是从 1 顺着排的，所以别去猜别人的号，也别指望自己的号有规律。</p>
-</div>
-
-<h2>二、目录结构（最重要）</h2>
-<div class="card">
-{self._code_card(exam)}
-<p>在<b>给定磁盘驱动器的根目录</b>下，建立一个以自己考号命名的目录，所有提交文件都放在它里面：</p>
+<p class="muted" style="margin-top:10px">考号由本平台随机发号（{store.DEFAULT_WIDTH} 位随机数，
+<b>不</b>是从 1 顺着排的），请以准考证为准 —— <b>不是机号</b>。</p>
 {self._dir_tree(exam, tree_kaohao, tree_name or "你的名字")}
 {self._rule_warn(kaohao or tree_kaohao, exam)}
-</div>
-
-<h2>三、个人信息文件</h2>
-<div class="card">
 {self._person_card(name)}
-<p class="muted" style="margin-bottom:0">这个文件不参与评分，但广东考区要求必须有。
-本场应提交：<code>{person_name}</code></p>
-</div>
-
-<h2>四、程序编写要求</h2>
-<div class="card">
-<table>
-<tr><th>项目</th><th>要求</th></tr>
-<tr><td>输入输出</td><td>{io_rule}</td></tr>
-<tr><td>提示信息</td><td><b>不做任何输入输出提示</b>，多余的提示<b>判为错误</b></td></tr>
-<tr><td>输出比较</td><td>过滤行末空格和文尾回车后<b>全文比较</b></td></tr>
-<tr><td>行首</td><td>不允许多余空格</td></tr>
-<tr><td>空行</td><td>前部和中间不允许多余空行</td></tr>
-<tr><td>同行分隔</td><td>多元素间<b>有且仅有一个</b>空格</td></tr>
-<tr><td>保存</td><td><b>每 15 分钟保存一次程序</b>，以防机器故障</td></tr>
-</table>
-</div>
-
-<h2>五、怎么算分</h2>
-<div class="card">
-<p><b>按测试点给分，过几个给几分——不捆绑。</b></p>
-<div class="flash flash-ok" style="margin:10px 0">
-  20 个测试点每个 5 分。过了 9 个就是 <b>45 分</b>；第 9 个点属于哪个子任务、
-  那个子任务里的其他点过没过，<b>都不影响</b>你已经拿到的这 5 分。
-</div>
-<p>题面里那张「子任务」表，是把测试点按<b>数据范围</b>分了个组，告诉你每段数据值多少分——</p>
-<ul>
-  <li>它<b>只是分组说明</b>，方便你看出自己的能力边界（比如"小数据能过、大数据 TLE"）</li>
-  <li>它<b>不是「整个子任务全过才给分」</b>——多过一个点就多一截分</li>
-</ul>
-<p class="muted" style="margin-bottom:0">所以做题时不要因为"反正这个子任务过不全"就放弃：
-   能把暴力分的点拿到手，就先拿到手。</p>
-</div>
-
-<h2>六、编译环境（Windows 与 NOI Linux 的坑）</h2>
-<div class="card">
-<p>最终成绩以 CCF 在 <b>NOI Linux 2.0</b> 及指定评测工具下的结果为准。编译问题由考生负责，
-   因环境差异提出的申诉<b>概不受理</b>。</p>
-<table>
-<tr><th>在 Windows 上这样写</th><th>到 NOI Linux 会怎样</th><th>应该改成</th></tr>
-<tr><td><code>__int64</code></td><td>无法编译</td><td><code>long long</code></td></tr>
-<tr><td><code>%I64d</code></td><td>无法编译</td><td><code>%lld</code> 或 cin/cout</td></tr>
-<tr><td>CRLF 换行</td><td>一般无影响，但不建议手工处理文件</td><td>保持原样即可</td></tr>
-<tr><td>文件名大小写随便写</td><td><b>找不到文件</b></td><td>严格按题目表里的英文名</td></tr>
-</table>
-<p class="muted" style="margin-bottom:0">本平台用 Linux 上的 g++ 评测，与考场同向；
-   考试页与交卷回执都会帮你核对文件名和目录结构，但真正负责的是你自己。</p>
-</div>
-
-<h2>七、考场纪律</h2>
-<div class="card">
-<ul>
-<li>认证开始 <b>15 分钟后禁止入场</b>，以缺考处理</li>
-<li><b>不能提前交卷</b>（认证进行 2 小时后方可离开）</li>
-<li><b>不能带任何资料进场</b>（包括纸张和电子器材）</li>
-<li>需签署《CSP-J/S 诚信考试及知情同意书》（考点统一提供）</li>
-<li>考试结束立即停止答题，离开后禁止逗留或返回</li>
-</ul>
-</div>
-
-<h2>八、考试期间能看到什么</h2>
-<div class="card">
-{score_block}
+<p class="muted" style="margin-bottom:0">考试期间看不到任何判分信息（编译结果、测试点、
+分数都没有），成绩由老师在考试结束后统一公布 ——
+所以交之前自己核对一遍：<b>文件名、目录位置、freopen 的文件名</b>。
+考试页右上角和交卷回执都会帮你核对目录结构。</p>
 </div>"""
         self._send(page(f"考生须知 · {contest['title']}", body))
 
