@@ -42,6 +42,49 @@ def check(cond: bool, msg: str) -> None:
         BAD += 1
 
 
+def js_obj(html: str, name: str):
+    """取页面里 `window.<name> = {...};` 那份 JSON —— **按花括号配对取**。
+
+    别用 `re.search(r"\\{.*?\\};")` 那种懒惰正则：页面里嵌的不只是标题/编号，
+    还有**标程源码**（「自己测试」要用它预填代码框），源码里随便一句
+    `int cnt[26] = {0};` 就带着 `};` —— 正则停在那儿，JSON 被截断，
+    整个检查脚本直接抛 JSONDecodeError 退出（踩过：冒烟里这一项静悄悄地不作声，
+    33 项通过里少了它的 3 项，看汇总还以为是全绿）。
+
+    字符串里的花括号和转义引号都要跳过，所以手写一遍扫描。
+    """
+    head = f"window.{name} = "
+    i = html.find(head)
+    if i < 0:
+        return None
+    i += len(head)
+    depth = 0
+    in_str = False
+    esc = False
+    for k in range(i, len(html)):
+        ch = html[k]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(html[i:k + 1])
+                except ValueError:
+                    return None
+    return None
+
+
 def main() -> int:
     key = open(os.path.join(R, "data", "admin_key.txt")).read().strip()
     with urllib.request.urlopen(f"{BASE}/admin/problems?key={urllib.parse.quote(key)}",
@@ -60,10 +103,12 @@ def main() -> int:
         if n != 1:
             check(False, f"查看题面地址里的 key 出现 {n} 次（应 1 次）：{url}")
         else:
-            cand = {}
-            mc = re.search(r"window\.CSP_CAND = (\{.*?\});", html, re.S)
-            if mc:
-                cand = json.loads(mc.group(1))
+            cand = js_obj(html, "CSP_CAND")
+            check(cand is not None,
+                  "页面里的题目数据（CSP_CAND）能解析（%d 道题）" % len(cand or {})
+                  if cand is not None else
+                  "页面里的题目数据（CSP_CAND）解析不出来 —— 标程里带 `};` 会把懒惰正则截断")
+            cand = cand or {}
             cached = [p for p in cand
                       if os.path.isfile(os.path.join(R, "data", "statements", f"{p}.md"))]
             pid = (cached or list(cand) or [""])[0]

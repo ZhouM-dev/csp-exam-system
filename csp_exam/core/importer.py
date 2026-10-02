@@ -379,13 +379,10 @@ def hydro_problem_pids() -> set[str]:
     return {line.strip() for line in (p.stdout or "").splitlines() if line.strip()}
 
 
-def hydro_delete_problem(pid: str) -> bool:
-    """按 pid 删除题目（用于 --overwrite）。
+def _problem_doc_id(pid: str) -> str | None:
+    """这道题在评测站里的 docId：`""` = 站点上没有这道题，`None` = 查不动（容器没起来/超时）。
 
-    题**本来就不存在**（或评测站没起来）时返回 False，不抛异常——
-    调用方经常是"先删掉旧的再导入"，题目不存在是正常情况。
-    （踩过：mongosh 什么都没查到时会打印一个空行，旧写法 `.splitlines()[-1]`
-    直接 IndexError，把验收脚本的准备阶段和整个导入流程带崩。）
+    区分这两种"没有"很重要：查不动时不能当成"已经删干净了"。
     """
     js = (f'const d=db.document.findOne({{docType:10,pid:"{pid}"}},{{docId:1}}); '
           f'print(d ? d.docId : "")')
@@ -393,10 +390,26 @@ def hydro_delete_problem(pid: str) -> bool:
         p = subprocess.run(COMPOSE + ["exec", "-T", "oj-mongo", "mongosh", "hydro", "--quiet", "--eval", js],
                            cwd=COMPOSE_DIR, capture_output=True, text=True, timeout=60,
                            encoding="utf-8", errors="replace")
-        lines = [x.strip() for x in (p.stdout or "").splitlines() if x.strip()]
-        doc_id = lines[-1] if lines else ""
     except (subprocess.TimeoutExpired, OSError):
-        return False
+        return None
+    lines = [x.strip() for x in (p.stdout or "").splitlines() if x.strip()]
+    # 查不到时 mongosh 只打印一个空行（踩过：旧写法 .splitlines()[-1] 直接 IndexError）
+    return lines[-1] if lines else ""
+
+
+def hydro_delete_problem(pid: str) -> bool:
+    """按 pid 删除题目（覆盖重建 / 彻底删除都用它）。返回 True = **确认删掉了**。
+
+    **命令跑完不等于题没了**：以前不看子进程结果、也不复查，删失败照样返回 True，
+    管理端就跟老师说"已彻底删除"，回头在站点上还看得见（踩过）。现在删完**再查一次**，
+    查不到才算成功；查不动（容器没起来）算失败——宁可说没删掉，也不能报假成功。
+
+    题**本来就不存在**（或评测站没起来）时返回 False，不抛异常——
+    调用方经常是"先删掉旧的再导入"，题目不存在是正常情况。
+    （踩过：mongosh 什么都没查到时会打印一个空行，旧写法 `.splitlines()[-1]`
+    直接 IndexError，把验收脚本的准备阶段和整个导入流程带崩。）
+    """
+    doc_id = _problem_doc_id(pid)
     if not doc_id:
         return False
     try:
@@ -405,11 +418,25 @@ def hydro_delete_problem(pid: str) -> bool:
                        encoding="utf-8", errors="replace")
     except (subprocess.TimeoutExpired, OSError):
         return False
-    return True
+    return _problem_doc_id(pid) == ""       # 复查：真的查不到了才算删掉
 
 
-def hydro_import(pid: str, container_dir: str, timeout: int = 300) -> tuple[bool, str]:
-    """调用站点自带的导入命令。"""
+def hydro_import(pid: str, container_dir: str, timeout: int = 300,
+                 before: set | None = None) -> tuple[bool, str]:
+    """调用站点自带的导入命令。**返回 True = 确认站点上出现了这个标识的题目。**
+
+    **导入命令说成功不等于题真的按这个标识建出来了**：评测站的 pid 只认
+    `^(?:[a-z0-9]{1,10}-)?[a-z][0-9a-z]*$`（带短横的前半截还得是注册过的命名空间），
+    标识不合规时它**不报错**，而是自己起个 `#<docId>` —— 输出里照样有
+    `Imported problem #63`，调用方以为成功，老师却在题库里找不到这道题，
+    站点上还多出一道没有标识的僵尸题（踩过）。
+
+    所以导完**复查一次**：站点上查不到这个标识就算失败，并把评测站自动建的那道清掉。
+
+    `before` —— 导入**之前**站点上有哪些标识（调用方手上通常已经有了，如
+    `create_problem` 的 `on_site`；传进来才能在出错时认出"这次新多出来的那道"）。
+    不传也能用，只是出错时没法清理，只能如实报错。
+    """
     cmd = COMPOSE + ["exec", "-T", "oj-backend", "hydrooj", "cli",
                      "problem", "import", "system", f"{container_dir}/{pid}"]
     try:
@@ -420,11 +447,29 @@ def hydro_import(pid: str, container_dir: str, timeout: int = 300) -> tuple[bool
     except OSError as e:
         return False, f"无法执行导入命令：{e}"
     blob = (p.stdout or "") + (p.stderr or "")
-    if re.search(r"Imported problem\s+\S+", blob):
-        return True, ""
-    if re.search(r"\bError\b|ENOENT|Exception", blob):
+    says_ok = bool(re.search(r"Imported problem\s+\S+", blob))
+    if not says_ok and re.search(r"\bError\b|ENOENT|Exception", blob):
         return False, blob.strip()[-300:]
-    return p.returncode == 0, blob.strip()[-200:]
+    if not says_ok and p.returncode != 0:
+        return False, blob.strip()[-200:]
+
+    # ---- 复查：站点上真的出现了这个标识吗
+    if _problem_doc_id(pid):
+        return True, ""
+    # 没出现：多半是标识不合评测站的规矩，它自己起了个 #N。把这次多出来的那道清掉。
+    junk = ""
+    if before is not None:
+        after = hydro_problem_pids()
+        new = sorted(after - set(before)) if after else []
+        if new and all(x.startswith("#") for x in new):
+            junk = "、".join(new)
+            for x in new:
+                hydro_delete_problem(x)
+    return False, (
+        f"评测站没有按标识 {pid} 建题（它的标识只收字母开头的字母数字，"
+        f"带短横/下划线/数字开头的都会被它悄悄换成自动编号）"
+        + (f"；已清掉它自动建的 {junk}" if junk else "")
+        + "。请把题目文件夹里的标识改成字母开头的样子（如 G01、candy2）再建。")
 
 
 # ---------------------------------------------------------------- 主接口
@@ -477,6 +522,14 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
         log(f"识别到 {len(dirs)} 道题" + (f"（索引里 {len(index_info)} 条元数据）" if index_info else ""))
 
         existing = set() if dry_run else hydro_problem_pids()
+        # 「假删除」的题在系统里**不再算占用**：老师把它删了又重新导这份题单，
+        # 应该把题导进去，而不是回一句"站点上已有同标识的题目"就不管了。
+        # 处理办法：先把旧的那份清掉，再用同一个标识导入（标识保持不变，
+        # 编号登记/题面缓存都对得上）。想"保留旧的、另建一份"走管理端「新建题目」，
+        # 那条路会自动换内部标识。
+        stale = {p for p in existing if _mk.is_deleted(p)}
+        if stale:
+            log(f"  其中 {len(stale)} 道是老师已删除的：{'、'.join(sorted(stale))}（会重建）")
         if not dry_run:
             os.makedirs(HOST_IMPORT_DIR, exist_ok=True)
 
@@ -506,12 +559,20 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
                 continue
 
             if pid in existing and not overwrite:
-                entry["status"] = "skipped"
-                entry["message"] = "站点上已有同标识的题目（加 --overwrite 可覆盖）"
-                report["skipped"].append(pid)
-                report["problems"].append(entry)
-                log(f"  [已存在] {pid} {title}")
-                continue
+                if pid in stale:
+                    # 老师已经把它假删除了（系统里不再认这道题）→ 清掉旧的再导入
+                    log(f"  [重建] {pid} {title}：站点上这份已被删除，先清掉旧的再导入")
+                    hydro_delete_problem(pid)
+                    existing.discard(pid)
+                    stale.discard(pid)
+                else:
+                    entry["status"] = "skipped"
+                    entry["message"] = ("站点上已有同标识的题目（加 --overwrite 可覆盖；"
+                                        "想两份都留着，用管理端「新建题目」建，会自动换内部标识）")
+                    report["skipped"].append(pid)
+                    report["problems"].append(entry)
+                    log(f"  [已存在] {pid} {title}")
+                    continue
 
             # ---- 题目编号：一律由系统分配（T00001，落盘到题库）；
             #      这里能指定的只有**默认英文名**（学生侧），留空则加进比赛时再填
@@ -553,7 +614,8 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
             shutil.copytree(pkg, target)
             if overwrite and pid in existing:
                 hydro_delete_problem(pid)
-            ok, msg = hydro_import(pid, CONTAINER_IMPORT_DIR)
+            # before=existing：导入前站点上有哪些标识（出错时用它认出"新多出来的那道"）
+            ok, msg = hydro_import(pid, CONTAINER_IMPORT_DIR, before=existing)
             entry["status"] = "imported" if ok else "failed"
             entry["message"] = msg
             (report["imported"] if ok else report["failed"]).append(pid)

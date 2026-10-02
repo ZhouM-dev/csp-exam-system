@@ -190,6 +190,66 @@ def main() -> int:
     ok(len(grp2) == 1 and grp2[0]["extra"], "只传附件也能收下")
 
     print()
+    print("=== 10. 重名：标识被占用时自动让位（建题可以建重复的题）===")
+    ok(mp.free_pid("G01", set()) == "G01", "标识空着：原样用")
+    ok(mp.free_pid("G01", {"G01"}) == "G01b", "被占了：让到 G01b")
+    ok(mp.free_pid("G01", {"G01", "G01b"}) == "G01c", "再让一位")
+    ok(mp.free_pid("G01", {"G01", "G01c"}) == "G01b", "中间空出来的位置也能用")
+    ok(mp.free_pid("G01", ["G01"]) == "G01b", "传 list 也行（内部转 set）")
+    ok(mp.free_pid("", set()) == "problem", "空标识兜底，不炸")
+    long40 = "y" * 40
+    got = mp.free_pid(long40, {long40})
+    ok(len(got) == 40 and got.endswith("b"), "顶格 40 字：截一下再加后缀", len(got))
+    # 让位出来的标识必须**符合评测站的规矩**：只认字母开头的字母数字，
+    # 短横/下划线会让它悄悄换成 #N（踩过：站点上多出一道没标识的僵尸题）
+    for base in ("G01", "candy2", "P1000"):
+        got = mp.free_pid(base, {base})
+        ok(("-" not in got and "_" not in got and "." not in got
+            and got[0].isalpha() and got.isalnum()),
+           "让位标识 %s 是评测站认的形式" % got)
+
+    print()
+    print("=== 11. 「已删除」记号：core 里记、core 里读（页面与导入流程共用）===")
+    old_dir = store.DATA_DIR
+    tmp3 = tempfile.mkdtemp(prefix="mk-info-")
+    store.DATA_DIR = tmp3
+    try:
+        ok(mp.is_deleted("G01") is False, "没记过 = 没删除")
+        mp.set_deleted("G01", True)
+        ok(mp.is_deleted("G01") is True, "打上记号后 is_deleted=True")
+        ok(mp.deleted_pids() == {"G01"}, "deleted_pids 列得出来", mp.deleted_pids())
+        mp.set_deleted("G02", True)
+        mp.set_deleted("G01", False)
+        ok(mp.deleted_pids() == {"G02"}, "取消记号后就不再算已删除", mp.deleted_pids())
+        rec = mp.load_problem_info().get("G01") or {}
+        ok("deleted" not in rec and "deleted_at" not in rec, "取消时把两个字段都清掉", sorted(rec))
+        ok("deleted_at" in (mp.load_problem_info().get("G02") or {}), "留着的那道有时间戳")
+        # 顺带验一下：记号不影响别的字段（题目编号/英文名那些）
+        info = mp.load_problem_info()
+        info["G02"] = dict(info.get("G02") or {}, code="T00009", name="candy")
+        mp.save_problem_info(info)
+        mp.set_deleted("G02", False)
+        rec2 = mp.load_problem_info().get("G02") or {}
+        ok(rec2.get("code") == "T00009" and rec2.get("name") == "candy",
+           "取消删除不会碰题目编号/英文名",
+           "%s / %s" % (rec2.get("code"), rec2.get("name")))
+
+        print()
+        print("=== 12. 作废旧缓存（覆盖重建时才用）===")
+        os.makedirs(os.path.join(tmp3, "statements"), exist_ok=True)
+        os.makedirs(os.path.join(tmp3, "samples", "G02"), exist_ok=True)
+        with open(os.path.join(tmp3, "statements", "G02.md"), "w", encoding="utf-8") as f:
+            f.write("# 旧题面")
+        gone = mp.drop_problem_cache("G02")
+        ok(set(gone) == {"题面缓存", "大样例存档"}, "两处都报了", gone)
+        ok(not os.path.isfile(os.path.join(tmp3, "statements", "G02.md")), "题面缓存没了")
+        ok(not os.path.isdir(os.path.join(tmp3, "samples", "G02")), "大样例存档没了")
+        ok(mp.drop_problem_cache("没有这道题") == [], "没有残留时不报错、返回空")
+    finally:
+        store.DATA_DIR = old_dir
+        shutil.rmtree(tmp3, ignore_errors=True)
+
+    print()
     print("================== 结果：%d 项通过，%d 项失败 ==================" % (PASS, FAIL))
     return 1 if FAIL else 0
 

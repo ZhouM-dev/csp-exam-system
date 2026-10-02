@@ -23,14 +23,18 @@ PASS=0; FAIL=0
 pass() { echo "   [PASS] $1"; PASS=$((PASS+1)); }
 fail() { echo "   [FAIL] $1"; FAIL=$((FAIL+1)); }
 
-# 清掉本脚本的测试数据（测试专用标识 T9101 / T9101b + 测试比赛）。
-# 开跑前与跑完后各调一次：本轮**建题不再支持覆盖**，上次跑到一半留下的 T9101
-# 会让这一次建题直接失败（「站点上已经有题目」），所以必须先清干净。
+# 清掉本脚本的测试数据（测试题目 + 测试比赛）。
+# 开跑前与跑完后各调一次：上次跑到一半留下的题（T9101 等）会让这一次建题建出重复份，
+# 所以必须先清干净。
+#
+# **按标题认，不按 pid 认**：重复建题时标识是自动让位的（T9101 → T9101b/c…），
+# 写死 pid 会漏掉它们，站点上就留下永远清不掉的僵尸题（踩过）。
 cleanup_data() {
 python3 - <<PY
 import os
 import shutil
-from csp_exam.core import store, importer as ip, problems as mp
+from csp_exam.core import store, importer as ip, problems as mp, hydro_client
+TEST_TITLES = ('加法测试',)          # 本脚本造的题的标题前缀（含「（坏标程）」「（第二份）」）
 for c in store.list_contests():
     if c['title'] in ('新题判分测试',):
         shutil.rmtree(os.path.join('data', 'contests', c['id']), ignore_errors=True)
@@ -39,21 +43,27 @@ for c in store.list_contests():
 e = store.load_exam('c1')
 e['problems'] = [p for p in e.get('problems', []) if p['pid'] != '$PID']
 store.save_exam('c1', e)
-for pid in ('$PID', '${PID}b'):
+# 站点上按标题找出本脚本造的题（含让位后的新标识）
+junk = []
+for it in hydro_client.list_problems():
+    pid, title = str(it.get('pid') or ''), str(it.get('title') or '')
+    if any(title.startswith(t) for t in TEST_TITLES) or pid in ('$PID', '${PID}b'):
+        junk.append(pid)
+for pid in junk:
     print('  删除题目', pid, ip.hydro_delete_problem(pid))
+print('  站点上认出的测试题：', junk or '无')
 # 连题目编号登记表一起清掉（否则会留下指向已删题目的编号）
 codes = mp.load_codes()
-gone = [p for p in ('$PID', '${PID}b') if codes.pop(p, None)]
+gone = [p for p in junk if codes.pop(p, None)]
 mp.save_codes(codes)
 print('  清掉编号登记：', gone or '无')
 # 题库元信息登记（题目列表页的「测试点/时限/内存」用它）也一起清，
 # 否则题目列表里会留一行指向已删题目的「加法测试」
 from csp_exam.web.admin_pages import load_problem_info, save_problem_info
 info = load_problem_info()
-gone2 = [p for p in ('$PID', '${PID}b') if info.pop(p, None)]
+gone2 = [p for p in junk if info.pop(p, None)]
 save_problem_info(info)
 print('  清掉题库元信息：', gone2 or '无')
-from csp_exam.core import hydro_client
 store.save_catalog(hydro_client.list_problems())
 print('  c1 题目：', [(p['no'], p['pid']) for p in store.load_exam('c1').get('problems', [])])
 print('  剩余比赛：', [c['title'] for c in store.list_contests()])
@@ -110,6 +120,15 @@ checks = [
     ('name="data"' in f, 'zip 输入框也在同一个表单里'),
     ('name="statement"' in f and 'name="std_text"' in f, '题面/标程也在同一个表单里'),
     ('/admin/scan' not in f, '表单里没有 /admin/scan（不再先识别一遍换 token）'),
+    # 本轮新增：上传进度（点「建题」之后不再是一片死等）
+    ('id="mk-up"' in html, '有上传进度面板'),
+    ('id="mk-up-fill"' in html and 'id="mk-up-pct"' in html, '进度条 + 百分比都在'),
+    ('xhr.upload.onprogress' in html, '传输阶段报真实百分比（xhr.upload.onprogress）'),
+    ('xhr.upload.onload' in html, '传完之后切到「服务端正在建题」'),
+    ('new FormData(' in html, '整个表单原样 XHR 上传（字段名/结构不变）'),
+    # f-string 里花括号要写两遍：漏一个 Python 就会去求值，页面要么 500、要么少一段。
+    # 这里拿"渲染出来应当是单个 { 的 CSS 规则"反查。
+    ('.up-bar.busy > i {' in html, '进度条的 CSS 花括号渲染正确（f-string 里没写坏）'),
 ]
 for okv, label in checks:
     print('   [%s] %s' % ('PASS' if okv else 'FAIL', label))
@@ -207,29 +226,38 @@ PY
 echo "  这道题拿到的题目编号：$CODE"
 
 echo
-echo "=== 3b. 建题不再支持覆盖：同标识再建一次会被拒绝（连 overwrite=1 也忽略）==="
-# 本轮把「覆盖已有题目」删了：站点上已经有同标识题目时，create_problem 固定
-# overwrite=False，直接失败并提示。这里故意再建一次 $PID，并带上老字段 overwrite=1
-# —— 应当照样被拒绝（老字段被忽略）。
-# 注意：失败是**把建题页重新渲染一遍**（HTTP 200 + 页面上一条红色提示），
-# 不是跳转，所以看的是响应正文，不是 redirect_url。
-curl -s -o $T/dup.html -w '  POST /admin/problem（同标识再建）-> HTTP %{http_code}\n' --max-time 120 -X POST \
-  -F "pid=$PID" -F "title=加法测试（想覆盖）" -F "time_ms=2000" -F "memory_mb=256" \
-  -F "statement=想覆盖" -F "overwrite=1" \
+echo "=== 3b. 建题可以建重复的题：同标识再建一次 → 新的一份换内部标识，旧的留着 ==="
+# 老师要的是"能建重复的题"：站点上已经有 $PID 时**不再拒绝**，这一份换个内部标识
+# （free_pid 给的是字母后缀，如 T9101→T9101b：**评测站只认字母开头的字母数字**，
+# 用 `-2`/`_2` 这种会被它悄悄换成 #N，见下面那条断言）。
+# 原来那道 $PID 原样不动（题目编号/题面/数据都还在）。老师界面只看得到题目编号，
+# 所以"内部标识让位"这件事对他不可见。顺带传个老字段 overwrite=1，证明它被忽略。
+HTTP=$(curl -s -o $T/dup.html -w '%{http_code}' --max-time 240 -X POST \
+  -F "pid=$PID" -F "title=加法测试（第二份）" -F "time_ms=2000" -F "memory_mb=256" \
+  -F "statement=第二份的题面" -F "overwrite=1" \
   -F "std=@$W/std.cpp;filename=标程.cpp" \
   -F "data=@$W/1.in;filename=1.in" -F "data=@$W/1.out;filename=1.out" \
-  "$BASE/admin/problem?key=$KEY"
+  "$BASE/admin/problem?key=$KEY")
+echo "  POST /admin/problem（同标识再建）-> HTTP $HTTP"
+[ "$HTTP" = "302" ] && pass "同标识再建成功（302 跳走；不再是「被拒绝 + 回显表单」）" \
+  || fail "同标识再建还是被拒（HTTP $HTTP，应该 302）"
 python3 - <<PY
-from csp_exam.core import hydro_client
-html = open('$T/dup.html', encoding='utf-8', errors='replace').read()
-i = html.find('已经有题目')
-print('  页面提示（片段）：', (html[max(0, i - 60): i + 160].replace('\n', ' ')
-                            if i >= 0 else '(页面上没有这句话)'))
-title = {str(i['pid']): i['title'] for i in hydro_client.list_problems()}.get('$PID')
+from csp_exam.core import hydro_client, problems as mp
+live = {str(i['pid']): i['title'] for i in hydro_client.list_problems()}
+code1 = mp.code_of_pid('$PID')
+# 第二份落在哪个标识上由 free_pid 决定（G01 → G01b 这种字母后缀），所以按标题找它；
+# 找不到、或者标识是 #N，都说明"让位"没落成评测站认的形式（#N 是评测站自己偷偷编的）
+second = [p for p, t in live.items() if t == '加法测试（第二份）']
+print('  站上 $PID → %r' % live.get('$PID'))
+print('  第二份 → 标识 %s' % (second or '没找到'))
+code2 = mp.code_of_pid(second[0]) if second else ''
+print('  题目编号：第一份 %s ／ 第二份 %s' % (code1 or '没分配', code2 or '没分配'))
 checks = [
-    (i >= 0, '同标识再建被拒绝（页面上提示站点上已经有这道题）'),
-    ('id="mk-form"' in html, '失败后把建题页带着提示重新渲染（可以改一处重试，不用跳走）'),
-    (title == '加法测试', '站点上那道题没被改动（标题还是「加法测试」，不是「想覆盖」）'),
+    (len(second) == 1, '第二份建出来了（自动让位到新标识）'),
+    (live.get('$PID') == '加法测试', '原来那道 $PID 没被动（标题还是「加法测试」，不是「第二份」）'),
+    (bool(second) and not second[0].startswith('#'),
+     '新标识是评测站认的形式（字母开头的字母数字，不是它私编的 #N）'),
+    (bool(code2) and code2 != code1, '第二份拿到**自己的**题目编号（两份能区分开）'),
 ]
 for okv, label in checks:
     print('   [%s] %s' % ('PASS' if okv else 'FAIL', label))
@@ -367,6 +395,16 @@ raise SystemExit(0 if ok else 1)
 " && pass "假删除不真删：编号/记号和评测站题目都留着（题面与提交记录还能看）" \
   || fail "假删除把东西真删了"
 curl -s "$BASE/admin/problems?key=$KEY" -o $T/pl_del.html
+# 假删除之后**系统不再认这道题**：配题候选（/api/problems）里不该再有它。
+# 题面/记录都还在（上面刚验过），只是不再出现在任何"选题目"的地方。
+curl -s "$BASE/api/problems?key=$KEY" -o $T/api_del.json
+python3 -c "
+import json
+d = json.load(open('$T/api_del.json', encoding='utf-8'))
+items = [i['pid'] for i in d.get('items') or []]
+print('  配题候选里有它吗：', '${PID}b' in items, '（候选共 %d 道）' % len(items))
+raise SystemExit(1 if '${PID}b' in items else 0)
+" && pass "假删除的题从配题候选里消失（系统不再认它）" || fail "假删除的题还挂在配题候选里"
 python3 -c "
 h = open('$T/pl_del.html', encoding='utf-8', errors='replace').read()
 main, sep, tail = h.partition('已删除的题目')
@@ -431,8 +469,8 @@ python3 - <<PY
 import os
 from csp_exam.core import store, importer as ip, problems as mp
 left = [c['title'] for c in store.list_contests() if c['title'] == '新题判分测试']
-left_p = [p for p in ('$PID', '${PID}b') if p in ip.hydro_problem_pids()]
-left_code = [p for p in ('$PID', '${PID}b') if mp.code_of_pid(p)]
+left_p = [p for p in ('$PID', '${PID}b', '$PID-2') if p in ip.hydro_problem_pids()]
+left_code = [p for p in ('$PID', '${PID}b', '$PID-2') if mp.code_of_pid(p)]
 okv = not (left or left_p or left_code)
 print('   [%s] 清理干净（残留比赛 %s / 题目 %s / 编号 %s）'
       % ('PASS' if okv else 'FAIL', left or '无', left_p or '无', left_code or '无'))

@@ -71,24 +71,16 @@ PROBLEM_INFO_FILE = "problem_info.json"
 #: 这个登记表最多留多少道题（按最近写入时间淘汰，防无限增长）
 PROBLEM_INFO_MAX = 800
 
+# 这份登记的**读写实现搬到了 `core/problems.py`**（`load_problem_info` / `save_problem_info`
+# / `set_deleted` …）：core 的建题与题单导入也要知道"这道题老师已经删了、不用再认"，
+# 而 core 不能反向 import web。这里保留同名别名，页面代码不用改一行；
+# 也更不会出现"两处各写一份、字段对不上"的事。
+load_problem_info = make_problem.load_problem_info
+save_problem_info = make_problem.save_problem_info
+
 
 def _problem_info_path() -> str:
-    return os.path.join(store.DATA_DIR, PROBLEM_INFO_FILE)
-
-
-def load_problem_info() -> dict:
-    """{题库标识: {title, code, name, cases, time_ms, memory_mb, std, at}}。
-
-    `code` 是**题目编号**（T00001，老师侧）；`name` 是建题时填的**默认英文名**（学生侧）。
-    """
-    data = store._load(_problem_info_path(), dict) or {}
-    items = data.get("items") if isinstance(data, dict) else None
-    return items if isinstance(items, dict) else {}
-
-
-def save_problem_info(items: dict) -> None:
-    store._save(_problem_info_path(), {
-        "items": items, "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+    return make_problem.info_path()
 
 
 def remember_problem(pid: str, *, title: str = "", code: str = "", name: str = "", cases=None,
@@ -2109,7 +2101,8 @@ class AdminPages:
                 f'<details style="margin-top:14px"><summary style="cursor:pointer">'
                 f'<b>已删除的题目（{len(gone)} 道）</b>'
                 f'<span class="muted"> —— 只是从上面的列表里收起来了：题面、历史提交记录都还在，'
-                f'可以恢复或彻底删除</span></summary>'
+                f'可以恢复或彻底删除。<b>这些题不再影响建题</b>：同一个标识再建一次会建出一份新的'
+                f'（内部换个标识，两份互不影响）</span></summary>'
                 f'<div class="card" style="overflow:auto;margin-top:8px">'
                 f'<table><tr><th>题目编号</th><th>英文名</th><th>标题</th><th>删除时间</th><th>操作</th></tr>'
                 f'{grows}</table></div></details>')
@@ -2523,8 +2516,30 @@ class AdminPages:
 （像 CSP 复赛那样可以在本机看大样例）；它<b>不参与评测、不影响分数</b>。
 出题文件夹里的 <code>大样例/</code> 目录会自动收进来。</p>
 <p style="margin-top:14px"><button type="submit">建题并导入评测站</button></p>
-<p class="muted">建完之后这道题立刻可以加进比赛：到比赛页「本场题目」里按<b>标题</b>搜索即可。
-文件较大时上传+导入需要十几秒，请耐心等页面跳转。</p>
+<style>
+/* 上传进度条（只这一页用；样式跟着页面走，不占全局 CSS） */
+.up-bar {{ height: 10px; background: #e2e8f0; border-radius: 6px; overflow: hidden; }}
+.up-bar > i {{ display: block; height: 100%; width: 0; background: #2563eb; }}
+.up-bar.busy > i {{
+  width: 100% !important;
+  background-image: linear-gradient(45deg, rgba(255,255,255,.4) 25%, transparent 25%,
+                    transparent 50%, rgba(255,255,255,.4) 50%, rgba(255,255,255,.4) 75%,
+                    transparent 75%);
+  background-size: 18px 18px;
+  animation: csp-up .9s linear infinite;
+}}
+@keyframes csp-up {{ from {{ background-position: 0 0; }} to {{ background-position: 18px 0; }} }}
+</style>
+<div id="mk-up" hidden style="margin-top:14px;padding:12px;border:1px solid #bae6fd;
+     background:#f0f9ff;border-radius:8px">
+  <p style="margin:0 0 8px"><b id="mk-up-title">正在上传…</b>
+     <span class="muted" id="mk-up-pct"></span></p>
+  <div class="up-bar" id="mk-up-bar"><i id="mk-up-fill"></i></div>
+  <p class="muted" id="mk-up-note" style="margin:8px 0 0"></p>
+</div>
+<p class="muted">建完之后这道题立刻可以加进比赛：到比赛页「本场题目」里按<b>标题</b>搜索即可。<br>
+点「建题并导入评测站」之后<b>这里会显示进度</b>：先报上传百分比，传完再提示服务端在建题
+（一道题十几秒，数据多时更久）。<b>期间别关页面</b>。</p>
 </div>
 </form>
 
@@ -2801,6 +2816,125 @@ class AdminPages:
     }});
   }}
 }})();
+</script>
+<script>
+/* ============================================================
+   建题上传：给个大概的进度。
+
+   原来的做法就是普通表单 POST —— 点完之后页面一动不动，几十 MB 的出题文件夹
+   要传一会儿，老师根本不知道是在传、还是卡住了。现在改成 XHR 上传，分两段显示：
+
+     ① 传输阶段：用 `xhr.upload.onprogress` 报**真实百分比**（还有已传/总大小、速度）
+     ② 服务端阶段：传完（`xhr.upload.onload`）之后进度条变成流动条纹，提示
+        "正在解包/配对测试点/导入评测站，别关页面" —— 这一段服务端没有细粒度进度
+        （建题是同步跑的，见 core/problems.create_problem），所以只报"在跑"，不报百分比，
+        不瞎编数字。
+
+   上传成功后跟着服务端的 302 走（`xhr.responseURL` 就是跳转后的地址），
+   于是"成功/失败"的提示仍由服务端那套 `?msg=` 统一渲染，前端不另写一套文案。
+   浏览器不支持 XHR/FormData 时不动表单，照旧直接提交。
+   ============================================================ */
+(function () {{
+  var form = document.getElementById('mk-form');
+  if (!form || !window.FormData || !window.XMLHttpRequest) return;
+  var box = document.getElementById('mk-up');
+  var bar = document.getElementById('mk-up-bar');
+  var fill = document.getElementById('mk-up-fill');
+  var titleEl = document.getElementById('mk-up-title');
+  var pctEl = document.getElementById('mk-up-pct');
+  var noteEl = document.getElementById('mk-up-note');
+  var btn = form.querySelector('button[type=submit]');
+  var sent = 0, lastT = 0;
+
+  function mb(n) {{ return (n / 1048576).toFixed(1) + ' MB'; }}
+  function pick() {{
+    var names = ['folder', 'data', 'std', 'bigsample'], n = 0, i, el, fs;
+    for (i = 0; i < names.length; i++) {{
+      el = form.querySelector('input[name=' + names[i] + ']');
+      fs = el && el.files;
+      for (var j = 0; fs && j < fs.length; j++) n += (fs[j].size || 0);
+    }}
+    return n;
+  }}
+  function stop(why) {{
+    form.dataset.busy = '';
+    if (btn) {{ btn.disabled = false; btn.textContent = '建题并导入评测站'; }}
+    if (bar) bar.classList.remove('busy');
+    if (fill) fill.style.width = '0%';
+    if (titleEl) titleEl.textContent = '没传成功';
+    if (noteEl) {{
+      noteEl.innerHTML = esc(why) + ' 再点一次「建题并导入评测站」重试；'
+        + '选好的文件还在，不用重新选。';
+    }}
+  }}
+  function esc(s) {{
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }}
+
+  form.addEventListener('submit', function (ev) {{
+    if (form.dataset.busy === '1') {{ ev.preventDefault(); return; }}   /* 别点两下 */
+    var bytes = pick();
+    if (!bytes) return;         /* 一个文件都没选：交给服务端回提示，前端不拦 */
+    ev.preventDefault();
+    form.dataset.busy = '1';
+    if (btn) {{ btn.disabled = true; btn.textContent = '正在建题…'; }}
+    if (box) box.hidden = false;
+    if (bar) bar.classList.remove('busy');
+    if (fill) fill.style.width = '0%';
+    if (pctEl) pctEl.textContent = '';
+    if (titleEl) titleEl.textContent = '正在上传出题文件夹…';
+    if (noteEl) {{
+      noteEl.innerHTML = '一共约 ' + mb(bytes) + '。传完由服务端解包、配对测试点、'
+        + '导入评测站。';
+    }}
+
+    var xhr = new XMLHttpRequest();
+    xhr.open('POST', form.getAttribute('action'), true);
+    sent = lastT = Date.now();
+    xhr.upload.onprogress = function (e) {{
+      var now = Date.now(), kbs;
+      if (!e.lengthComputable) {{
+        if (titleEl) titleEl.textContent = '正在上传…';
+        if (noteEl) noteEl.innerHTML = '已传 ' + mb(e.loaded) + '（浏览器没报总大小）';
+        return;
+      }}
+      var p = e.loaded / e.total * 100;
+      if (fill) fill.style.width = p.toFixed(1) + '%';
+      if (pctEl) pctEl.textContent = p.toFixed(0) + '%';
+      if (now - lastT < 400) return;              /* 每 0.4 秒刷一次就够了 */
+      kbs = (e.loaded - sent) / 1024 / Math.max(0.001, (now - lastT) / 1000);
+      sent = e.loaded;
+      lastT = now;
+      if (noteEl) {{
+        noteEl.innerHTML = '已传 <b>' + mb(e.loaded) + '</b> / ' + mb(e.total)
+          + '（约 ' + (kbs >= 1024 ? (kbs / 1024).toFixed(1) + ' MB/s'
+                                   : kbs.toFixed(0) + ' KB/s') + '）';
+      }}
+    }};
+    xhr.upload.onload = function () {{            /* 传输结束，剩下是服务端干活 */
+      if (titleEl) titleEl.textContent = '上传完成，服务端正在建题…';
+      if (pctEl) pctEl.textContent = '';
+      if (fill) fill.style.width = '100%';
+      if (bar) bar.classList.add('busy');
+      if (noteEl) {{
+        noteEl.innerHTML = '正在解包、配对测试点、导入评测站 —— 一道题通常十几秒，'
+          + '数据多或题库大时更久。<b>这一段没有细粒度进度，请别关页面、别刷新</b>，'
+          + '跑完会自动跳转。';
+      }}
+    }};
+    xhr.onload = function () {{
+      if (xhr.status >= 200 && xhr.status < 400) {{
+        location.href = xhr.responseURL || form.getAttribute('action');
+        return;
+      }}
+      stop('服务端返回了 ' + xhr.status + '。');
+    }};
+    xhr.onerror = function () {{ stop('上传时网络断了。'); }};
+    xhr.ontimeout = function () {{ stop('上传超时了。'); }};
+    xhr.send(new FormData(form));
+  }});
+}})();
 </script>"""
         self._send(page("新建题目", body, math=True))
 
@@ -2814,17 +2948,12 @@ class AdminPages:
         return used
 
     def _set_problem_deleted(self, pid: str, flag: bool) -> None:
-        """打上／取消「已删除」这个记号（就改 `problem_info.json` 里的一个字段）。"""
-        info = load_problem_info()
-        rec = dict(info.get(pid) or {})
-        if flag:
-            rec["deleted"] = 1
-            rec["deleted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        else:
-            rec.pop("deleted", None)
-            rec.pop("deleted_at", None)
-        info[pid] = rec
-        save_problem_info(info)
+        """打上／取消「已删除」这个记号（就改 `problem_info.json` 里的一个字段）。
+
+        实现在 `core/problems.set_deleted` —— 建题/题单导入那两条路也要看这个记号
+        （见 `is_deleted`），所以不能只放在页面层。
+        """
+        make_problem.set_deleted(pid, flag)
 
     def _delete_problem(self, pid: str, key: str) -> None:
         """删除题目 = **假删除**：从「题目列表」里收起来，别的什么都不动。
@@ -2836,6 +2965,10 @@ class AdminPages:
 
         顺带把慢的问题也解决了：真删要 `docker exec` 进容器跑 mongosh + `hydrooj cli`
         （好几秒），完了再刷一次题库缓存又是好几秒；假删除**一个 exec 都不用**，点完立刻回来。
+
+        **删掉之后系统不再认这道题**：题库待选、配题候选、题目列表里都不再出现它，
+        它也不再挡建题 —— 同一个标识再建一次会**建出一份新的**（内部标识自动让开，
+        见 `core/problems.free_pid`），旧的那份原样留着。
 
         **还在比赛里用着的题不许删**：那一场的 `exam.json` 指着它
         （和「有人提交后不许重排考号」是同一类保护）。要删得先把那些比赛里的这道题移除。
@@ -2855,7 +2988,8 @@ class AdminPages:
         log(f"[管理端] 假删除题目 {pid}（{title}）：题面/大样例/编号/评测站都保留")
         self._redirect(admin_url(key, path="/admin/problems", msg=(
             f"已删除题目 {pid}（{title}）—— 只是从列表里收起来了："
-            f"题面和历史提交记录都还看得到。要找回来，在下面「已删除的题目」里点「恢复」。")))
+            f"题面和历史提交记录都还看得到。要找回来，在下面「已删除的题目」里点「恢复」。"
+            f"这个标识不再挡建题：同一份文件夹再建一次会建出一份新的，两份互不影响。")))
 
     def _restore_problem(self, pid: str, key: str) -> None:
         """把假删除的题放回列表。题面/大样例/编号一直都在，所以恢复是瞬间的。"""
@@ -2893,12 +3027,17 @@ class AdminPages:
                 f"先从那些比赛里把它移除，再回来删。")))
             return
         title = str((load_problem_info().get(pid) or {}).get("title") or pid)
-        done = []
+        done, failed = [], []
         try:
+            # 返回 True = 已经**复查确认**评测站上查不到这道题了（见 importer.hydro_delete_problem）。
+            # 以前这里不看结果，删失败也照样跟老师说"已彻底删除"，回头站点上还看得见（踩过）。
             if import_problemset is not None and import_problemset.hydro_delete_problem(pid):
                 done.append("评测站题目")
+            else:
+                failed.append("评测站题目")
         except Exception as e:                                     # noqa: BLE001
             log(f"[管理端] 彻底删题 {pid}：评测站删除失败 {e!r}")
+            failed.append("评测站题目")
         codes = make_problem.load_codes()
         if pid in codes:
             codes.pop(pid)
@@ -2909,23 +3048,25 @@ class AdminPages:
             info.pop(pid)
             save_problem_info(info)
             done.append("题目信息")
-        stmt = os.path.join(store.DATA_DIR, "statements", f"{pid}.md")
-        if os.path.isfile(stmt):
-            try:
-                os.remove(stmt)
-                done.append("题面缓存")
-            except OSError as e:
-                log(f"[管理端] 彻底删题 {pid}：删题面缓存失败 {e!r}")
-        samples = os.path.join(store.DATA_DIR, "samples", pid)
-        if os.path.isdir(samples):
-            shutil.rmtree(samples, ignore_errors=True)
-            done.append("大样例存档")
+        # 题面缓存 + 大样例存档（和建题时作废旧缓存的实现同一份，别各写一遍）
+        cache_gone = make_problem.drop_problem_cache(pid)
+        if cache_gone:
+            done.extend(cache_gone)
         # 题库缓存也刷新一下，别再列出这道题
         try:
             store.save_catalog(hydro.list_problems())
         except (hydro.HydroError, OSError) as e:
             log(f"[管理端] 彻底删题 {pid}：刷新题库缓存失败 {e!r}")
-        log(f"[管理端] 彻底删除题目 {pid}（{title}），清掉了：{'、'.join(done) or '无（本来就没有）'}")
+        log(f"[管理端] 彻底删除题目 {pid}（{title}），清掉了：{'、'.join(done) or '无（本来就没有）'}"
+            + (f"；**没删掉**：{'、'.join(failed)}" if failed else ""))
+        if failed:
+            # 本地痕迹都清了，但评测站上还留着 —— 如实说，并给出还能怎么办
+            self._redirect(admin_url(key, path="/admin/problems", msg=(
+                f"「{pid}」（{title}）本地记录已清掉，但**评测站上的题目没能删掉**"
+                f"（{'、'.join(failed)}）—— 多半是评测站没起来或命令超时。"
+                f"它还会出现在题库里，可以过一会儿再点一次「彻底删除」；"
+                f"不影响建题（重名会自动换内部标识）。")))
+            return
         self._redirect(admin_url(key, path="/admin/problems", msg=(
             f"已彻底删除题目 {pid}（{title}）" +
             (f"：{'、'.join(done)}。" if done else "：本地没有它的残留。") +
@@ -3043,6 +3184,11 @@ class AdminPages:
             if bad:
                 msg += "；失败：" + "、".join(f"{i.get('title') or i['pid']}"
                                              f"（{(i.get('error') or '')[:40]}）" for i in bad)
+            renamed = [i for i in good if i.get("pid_from")]
+            if renamed:
+                # 重名不再拒绝：站点上已有同名标识的那几道，这份换了内部标识，两份都在
+                msg += ("；其中 " + "、".join(f"{i['pid_from']}→{i['pid']}" for i in renamed)
+                        + " 站点上已有同名标识，改用了新的内部标识（老师界面只看得到题目编号）")
             for it in good:      # 记下测试点数/时限/内存/标程（「题目列表」页要用）
                 remember_problem(it["pid"], title=it.get("title", ""),
                                  code=it.get("number", ""), name=it.get("name", ""),
@@ -3097,6 +3243,11 @@ class AdminPages:
         msg = (f"题目 {rep.get('number') or rep['pid']}（{rep['title']}）已导入，"
                f"共 {rep['cases']} 组测试数据"
                f"（{', '.join(rep['case_names'][:6])}{'…' if rep['cases'] > 6 else ''}）")
+        if rep.get("pid_from"):
+            # 重名不再拒绝建题：站点上那份（可能是已删除的）原样留着，这份换了内部标识
+            msg = (f"站点上已经有 {rep['pid_from']} 了，这份新题改用了内部标识 "
+                   f"{rep['pid']}（老师界面只看得到下面的题目编号）—— 两份都在，互不影响。"
+                   + msg)
         if rep.get("number"):
             msg += f"；题目编号 {rep['number']}（老师用它定位这道题）"
         if rep.get("name"):

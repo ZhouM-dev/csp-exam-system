@@ -93,6 +93,103 @@ def save_codes(items: dict) -> None:
                                    "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
 
 
+# ---------------------------------------------------------------- 建题登记（含「已删除」记号）
+#
+# `data/problem_info.json`：建题时记下的元信息 —— 测试点数、时限、内存、标程、
+# 以及**假删除记号** `deleted`。同样包一层 `{"items": {...}, "updated_at": ...}`。
+#
+# 放在 core 里（原先在 web/admin_pages.py）：core 的建题/导入流程也要知道
+# "这道题老师已经删了"，而 core 不能反向 import web。
+
+#: 建题登记的落盘文件名
+INFO_FILE = "problem_info.json"
+
+
+def info_path() -> str:
+    """建题登记的路径（data/problem_info.json）。"""
+    from . import store
+    return os.path.join(store.DATA_DIR, INFO_FILE)
+
+
+def load_problem_info() -> dict:
+    """{题库标识: {title, cases, time_ms, memory_mb, std, deleted, deleted_at, at}}。"""
+    from . import store
+    data = store._load(info_path(), dict) or {}
+    items = data.get("items") if isinstance(data, dict) else None
+    return items if isinstance(items, dict) else {}
+
+
+def save_problem_info(items: dict) -> None:
+    from . import store
+    with store._LOCK:
+        store._save(info_path(), {"items": items,
+                                  "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")})
+
+
+def is_deleted(pid: str) -> bool:
+    """这道题是不是**假删除**了（老师从列表里收起来了）。"""
+    rec = load_problem_info().get(str(pid or "").strip()) or {}
+    return bool(rec.get("deleted"))
+
+
+def deleted_pids() -> set[str]:
+    """全部假删除的题库标识。"""
+    return {str(pid) for pid, rec in load_problem_info().items()
+            if isinstance(rec, dict) and rec.get("deleted")}
+
+
+def set_deleted(pid: str, flag: bool = True) -> None:
+    """打上／取消「已删除」记号（只动 problem_info.json，别的一概不碰）。"""
+    pid = str(pid or "").strip()
+    if not pid:
+        return
+    info = load_problem_info()
+    rec = dict(info.get(pid) or {})
+    if flag:
+        rec["deleted"] = 1
+        rec["deleted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        rec.pop("deleted", None)
+        rec.pop("deleted_at", None)
+    info[pid] = rec
+    save_problem_info(info)
+
+
+#: 生成"让位标识"时用的后缀字母（见 `free_pid`）。
+#: **只能用字母**：评测站（hydrooj `model/problem.ts` 的 `isValidPid`）只认
+#: `^(?:[a-z0-9]{1,10}-)?[a-z][0-9a-z]*$`，而且带短横的前半截还得是注册过的命名空间。
+#: 所以 `G01-2`、`G01_2` 这类后缀它一律不收，**并且不报错** —— 它会自己起个
+#: `#<docId>` 当标识（踩过：导入照样打印 "Imported problem #63"，老师却在题库里
+#: 找不到这道题，站点上还多一道没标识的僵尸题）。`T9101b` 这种「字母结尾」才是它认的。
+_SUFFIX_LETTERS = "bcdefghijklmnopqrstuvwxyz"
+
+
+def free_pid(pid: str, taken) -> str:
+    """找一个**评测站上还没被占**的标识：`pid` 被占了就试 `pidb`、`pidc`…
+
+    「建题可以建重复的题」就是靠它：同一份出题文件夹建第二遍时，站点上已经有一个
+    同标识的题了，新的这份就落成 `G01b`（老师看不到这个内部标识，看到的是系统分配的
+    **题目编号** T000xx）。旧的那份**原样留着**（题面、历史提交记录都还在），两边互不影响
+    —— 这比"先删旧的再建"安全：删了再建会让历史提交挂到新题上。
+
+    后缀只用字母、不用 `-`/`_`/数字，原因见 `_SUFFIX_LETTERS` 上面那段。
+    """
+    pid = str(pid or "").strip() or "problem"
+    taken = {str(x) for x in (taken or ())}
+    if pid not in taken:
+        return pid
+    for ch in _SUFFIX_LETTERS:
+        cand = pid[:39] + ch
+        if cand not in taken:
+            return cand
+    for n in range(2, 100):
+        suffix = f"z{n}"
+        cand = pid[:40 - len(suffix)] + suffix
+        if cand not in taken:
+            return cand
+    return pid[:39] + "z"             # 理论上到不了（25 + 98 个重名）
+
+
 def code_of_pid(pid: str, items: dict | None = None) -> str:
     """这道题（题库标识/分类号）的**题目编号**（`T00001`）；还没编号就返回 ""。"""
     rec = (load_codes() if items is None else items).get(str(pid or "").strip()) or {}
@@ -584,10 +681,34 @@ def build_package(dest_root: str, pid: str, title: str, cases: list[dict],
     return root
 
 
+def drop_problem_cache(pid: str) -> list[str]:
+    """作废这道题在考试服务这边的**旧**缓存：题面缓存 + 大样例存档。
+
+    只有"同一标识下换了新内容"（`overwrite=True`）时才需要 —— 不然题面页会拿
+    `data/statements/<pid>.md` 里的旧题面糊弄人，学生下载到的大样例也是旧的。
+    返回清掉的东西（给日志/提示用）。
+    """
+    from . import store
+    gone = []
+    stmt = os.path.join(store.DATA_DIR, "statements", f"{pid}.md")
+    if os.path.isfile(stmt):
+        try:
+            os.remove(stmt)
+            gone.append("题面缓存")
+        except OSError:
+            pass
+    samples = os.path.join(store.DATA_DIR, "samples", pid)
+    if os.path.isdir(samples):
+        shutil.rmtree(samples, ignore_errors=True)
+        gone.append("大样例存档")
+    return gone
+
+
 def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
                    time_ms: int = DEFAULT_TIME_MS, memory_mb: int = DEFAULT_MEMORY_MB,
                    statement: str = "", std_source: str = "", overwrite: bool = False,
-                   tags: list[str] | None = None, name: str = "", code: str = "") -> dict:
+                   tags: list[str] | None = None, name: str = "", code: str = "",
+                   on_site: set | None = None) -> dict:
     """建**一道**题目并导入评测站。返回报告（含数据配对情况与导入结果）。
 
     uploads 既可以是扁平的一堆 .in/.out，也可以是**出题工程结构**（会自动识别
@@ -597,6 +718,11 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
     写 freopen；填了就存进题库（加进比赛时当默认值，本场配题时还能改）。
     只允许小写字母、数字、下划线，不合法会拒绝。
     code —— 老参数名（等价于 `name`），仅为兼容旧调用点保留。
+    on_site —— 评测站上已有的标识（想省一次查询就自己传进来；批量建题时一份够用）。
+
+    **标识被占用不再拒绝建题**：`G01` 被占了，这一份就落成 `G01-2`（内部标识，
+    老师看不到），旧的那份原样留着。此时报告里多一个 `pid_from`（原来的标识），
+    调用方拿它给老师一句提示。想真的覆盖同一道题，传 `overwrite=True`。
 
     返回报告里：`number` 是系统分配的**题目编号**（`T00001`，老师侧定位用），
     `name` 是这道题的默认**英文名**，`code` 与 `number` 相同（兼容旧调用点）。
@@ -636,12 +762,21 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
                          "例如 1.in 和 1.out；也可以直接传一个 zip 或整个出题文件夹。",
                 "notes": notes, "problems": problems}
 
-    exists = pid in ip.hydro_problem_pids()
+    # 标识被占（不管那道题是不是已经被假删除）就自动换一个 —— **不再拒绝建题**。
+    # 老师要的是"能建重复的题"，而且假删除过的题在系统里本来就不该再挡路。
+    on_site = ip.hydro_problem_pids() if on_site is None else on_site
+    exists = pid in on_site
+    pid_from = ""
     if exists and not overwrite:
-        return {"ok": False,
-                "error": f"站点上已经有题目 {pid} 了。要替换请先到「题目列表」把它"
-                         f"彻底删除（假删除只是从列表里收起来，标识还占着），再回来建",
-                "notes": notes, "cases": len(cases), "exists": True}
+        fresh = free_pid(pid, on_site)
+        if fresh != pid:
+            pid_from = pid
+            pid = fresh
+            exists = False          # 新标识本来就是空的，不用先删
+    if overwrite and exists:
+        # 覆盖式重建：同一标识下换了新题面/新数据，旧缓存必须一起作废，
+        # 否则题面页会拿 `data/statements/<pid>.md` 里的旧题面糊弄人。
+        drop_problem_cache(pid)
 
     # ---- 题目编号：建题时由系统分配（T00001，跟着题走）；英文名记成默认值
     try:
@@ -657,7 +792,10 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
                          std_source=std_source, tags=tags)
     if exists:
         ip.hydro_delete_problem(pid)
-    ok, err = ip.hydro_import(pid, ip._container_path(ip.HOST_IMPORT_DIR + "/_mk"))
+    # before=on_site：万一评测站没按这个标识建题（标识不合它的规矩），
+    # 它会把错误信息带回来，并顺手清掉评测站自动建的那道（见 hydro_import）
+    ok, err = ip.hydro_import(pid, ip._container_path(ip.HOST_IMPORT_DIR + "/_mk"),
+                              before=on_site)
     out = {
         "ok": ok, "error": err, "pid": pid, "title": title,
         "number": number,                       # 题目编号（老师侧）：T00001
@@ -667,6 +805,9 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
         "no_answer": [c["name"] for c in cases if not c.get("out")],
         "notes": notes, "problems": problems,
         "overwritten": bool(exists), "package": root,
+        # 原来的标识：只在这道题**因为重名而改了内部标识**时才有值，
+        # 调用方拿它给老师一句「站点上已有 G01，这份记作 G01-2」
+        "pid_from": pid_from,
         "detected": bool(prob), "sample_notes": (prob or {}).get("sample_notes") or [],
     }
     # 大样例 / 题目样例：存到考试服务这边，学生能在考试页下载（Hydro 那边不加，
@@ -707,18 +848,28 @@ def create_bundle(uploads: dict[str, bytes], *, time_ms: int = DEFAULT_TIME_MS,
     want_names = dict(codes or {})
     want_names.update(names or {})
     items = []
+    on_site: set | None = None      # 站点上已有的标识：查一次，整批共用
     for prob in det["problems"]:
         if only and prob["pid"] not in only:
             continue
-        items.append(create_problem(prob["pid"], prob["title"], files,
-                                    time_ms=time_ms, memory_mb=memory_mb,
-                                    statement=statement, overwrite=overwrite, tags=tags,
-                                    name=want_names.get(prob["pid"], "")))
+        if on_site is None and not overwrite:
+            on_site = ip.hydro_problem_pids()
+        got = create_problem(prob["pid"], prob["title"], files,
+                             time_ms=time_ms, memory_mb=memory_mb,
+                             statement=statement, overwrite=overwrite, tags=tags,
+                             name=want_names.get(prob["pid"], ""), on_site=on_site)
+        if on_site is not None and got.get("ok") and got.get("pid"):
+            on_site.add(got["pid"])     # 同一批里再来一道同名题，别再撞上刚建好的
+        items.append(got)
     ok_all = all(i.get("ok") for i in items) if items else False
     msg = (f"共识别并导入 {len(items)} 道题："
            + "、".join(f"{i['pid']}→{i.get('number') or '没编号'}"
                        f"（英文名 {i.get('name') or '待填'}）"
                        f"({'成功' if i.get('ok') else '失败'})" for i in items))
+    renamed = [i for i in items if i.get("pid_from")]
+    if renamed:
+        msg += ("；其中 " + "、".join(f"{i['pid_from']}→{i['pid']}" for i in renamed)
+                + " 站点上已有同名标识，改用了新的内部标识（老师界面只看得到题目编号）")
     return {"ok": ok_all, "items": items, "message": msg, "detected": det["message"]}
 
 
