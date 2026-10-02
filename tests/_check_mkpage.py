@@ -107,7 +107,10 @@ def main() -> int:
         ("xhr.upload.onprogress", "用 XHR 报传输百分比"),
         ("xhr.upload.onload", "传完之后切到「服务端正在建题」"),
         ("new FormData(form)", "整个表单原样上传（字段名/form 结构不变）"),
-        ("location.href = xhr.responseURL", "跑完跟着服务端的 302 走，提示仍由服务端渲染"),
+        ("location.href = target", "跑完跟着服务端的 302 走，提示仍由服务端渲染"),
+        ("target !== form.action", "判断有没有跳转时比的是绝对地址 form.action（不是相对地址）"),
+        ("document.write(xhr.responseText)",
+         "没跳转（服务端直接回显失败页）时把那份 HTML 装进来，红框提示不会丢"),
     ):
         check(frag in p.html, label)
     check("请别关页面" in p.html, "明确告诉老师服务端那段别关页面")

@@ -2925,7 +2925,21 @@ class AdminPages:
     }};
     xhr.onload = function () {{
       if (xhr.status >= 200 && xhr.status < 400) {{
-        location.href = xhr.responseURL || form.getAttribute('action');
+        var target = xhr.responseURL || '';
+        /* 比的是**绝对地址** `form.action`（IDL 属性，浏览器解析过），
+           不是 `getAttribute('action')`（那是相对地址字符串）—— 拿相对地址比，
+           两者永远不相等，于是失败页也被当成"跳转过了"，红框提示照样丢（踩过）。 */
+        if (target && target !== form.action) {{
+          location.href = target;      /* 302 跳转后的地址（带 ?m=… 的成功/失败提示） */
+          return;
+        }}
+        /* 没有跳转 = 服务端**直接把失败页回显了**（HTTP 200 + 红框提示 + 回填的字段）。
+           这时候不能拿 responseURL 再 GET 一次 —— 那样提示就没了（踩过：
+           提交一次假数据，页面干干净净像是成功了一样）。把服务端那份 HTML 装进来，
+           于是"失败提示 + 认出来的结构 + 填过的字段"都在。 */
+        document.open();
+        document.write(xhr.responseText);
+        document.close();
         return;
       }}
       stop('服务端返回了 ' + xhr.status + '。');
