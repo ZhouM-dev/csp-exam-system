@@ -309,7 +309,7 @@ contests/<比赛id>/
 
 ```bash
 python3 csp_exam/tools/run_selftests.py     # 包内自测：6 套 167 项，约 1 秒，不需要 docker
-bash tests/_smoke_pages.sh                  # 全路由冒烟：37 项，约 2 秒
+bash tests/_smoke_pages.sh                  # 全路由冒烟：41 项，约 2 秒
 bash tests/_regress_all.sh --quick          # 上面两项（约 4 秒）
 bash tests/_regress_all.sh                  # 全量：再加 7 套端到端（约 10 分钟）
 bash tests/_regress_all.sh roster tree      # 只跑相关的那几套（绕开最慢的 rules，约 9 秒）

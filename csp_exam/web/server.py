@@ -283,7 +283,11 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             # （踩过：原来这里无条件 _redirect("/")，未登录时浏览器会在 / 上无限自我跳转）
             s = self._session()
             want = q.get("c", "")
-            if s:
+            # `again=1`：这是从「不在名单里」那一页点过来的「重新输入考号」。
+            # 那种情况下会话**必须清掉**（下面的 if s 会把人又弹回比赛页，来回死循环），
+            # 见下面那段注释。
+            again = q.get("again") in ("1", "true", "yes")
+            if s and not again:
                 scid, kaohao = s
                 if want and want != scid:
                     # 拿着别场的会话走这个考场的链接：清掉旧会话，显示这一场的登录页。
@@ -301,7 +305,14 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
                 self._send(page("考场不存在",
                                 self._flash("err", "这个考试链接不对，请找老师核对。")), 404)
                 return
-            self._login_page(contest=store.get_contest(want) if want else None)
+            # 走到这里要么本来就没登录，要么是 `again=1`。
+            # **踩过（学生反馈"点重新输入考号没反应、一直卡在那一页"）**：考号被老师重排之后，
+            # 学生手上的会话还指着旧考号 —— `/hall` 判定"不在名单里"给出那一页，那一页的按钮
+            # 指向 `/enter?c=…`，而 `/enter` 一看到会话就又 redirect 回 `/hall`，
+            # 于是自己跳自己、永远出不去（页面上就是"点了没反应"）。
+            # 现在按钮带 `again=1`，到这里**顺手把这个场次的会话清掉**，学生就能重新输考号。
+            self._login_page(contest=store.get_contest(want) if want else None,
+                             cookie="csp=; Path=/; Max-Age=0" if again else "")
             return
         if path == "/contests":
             s = self._session()
@@ -318,10 +329,22 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             contest = store.get_contest(cid) if cid else None
             if not contest:
                 s = self._session()
-                if s:
+                if s and store.get_contest(s[0]):
                     self._redirect(f"/hall?c={urllib.parse.quote(s[0])}")
-                else:
-                    self._redirect("/")
+                    return
+                if s:
+                    # 会话指着的比赛已经没了（老师把场次删了，比如删测试场）：别再往
+                    # `/hall?c=<自己>` 跳 —— 那是自己跳自己，浏览器直接报
+                    # ERR_TOO_MANY_REDIRECTS（和上面 /enter 那个"点了没反应"是同一类：
+                    # 会话指着的东西已经不存在了，就必须清掉会话、给个能走的路）。
+                    self._send(page("这场考试已经不在了",
+                                    self._flash("err", "老师可能把这场考试删掉了"
+                                                       "（或者换了个新的考试链接）。") +
+                                    '<p><a class="btn" href="/">回到首页</a> '
+                                    '<a class="btn btn-gray" href="/help">考生须知</a></p>'),
+                               404, cookie="csp=; Path=/; Max-Age=0")
+                    return
+                self._redirect("/")
                 return
             kaohao = self._student(cid)
             if not kaohao:
@@ -329,9 +352,18 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
                 self._redirect(f"/enter?c={urllib.parse.quote(cid)}")
                 return
             if kaohao not in store.load_roster(cid):
+                # `again=1` 是关键：不带它，这一页的按钮点了等于没点 ——
+                # `/enter` 看到会话还在就又跳回这里（自己跳自己，学生说"点了没反应"）。
                 self._send(page("不在名单里", self._flash(
                     "err", f"考号 {kaohao} 不在本场名单里。") +
-                    f'<p><a class="btn" href="/enter?c={urllib.parse.quote(cid)}">重新输入考号</a></p>'), 403)
+                    '<p class="muted">最常见的原因是<b>老师重新排过考号</b>'
+                    '（每场考试的考号是重新发的，上次的号这一场不作数），'
+                    '也可能是这一个字符输错了 —— 注意短横是半角 <code>-</code>、字母要大写。'
+                    '点下面重新输一次就行。</p>'
+                    f'<p><a class="btn" href="/enter?c={urllib.parse.quote(cid)}&amp;again=1">'
+                    f'重新输入考号</a> '
+                    f'<a class="btn btn-gray" href="/help?c={urllib.parse.quote(cid)}">考生须知</a></p>'),
+                    403)
                 return
             if path == "/hall":
                 self._hall_page(kaohao, contest, cid)

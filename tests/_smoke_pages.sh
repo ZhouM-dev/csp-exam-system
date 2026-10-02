@@ -72,6 +72,33 @@ grep -q '考号' /root/csp-exam/tests/tmp/enter2.html \
 check "跨场访问 hall"   "$BASE/hall?c=c2" "$J"
 
 echo
+echo "=== 「不在名单里」不能把人卡死（学生反馈：点「重新输入考号」没反应）==="
+# 造一个**签名合法、但不在本场名单里**的会话（模拟老师重排考号之后学生手上的旧号）。
+# 死循环是这样来的：/hall 判定不在名单 → 给那一页；那一页的按钮指向 /enter?c=…，
+# 而 /enter 一看到会话还在就又 redirect 回 /hall → 自己跳自己，点多少次都是这一页。
+NIN=/tmp/notin.jar
+NINCOOKIE=$(python3 -c "
+from csp_exam.core.security import make_cookie
+print(make_cookie('$CID', 'GD-S99999'))")
+printf '# Netscape HTTP Cookie File\n127.0.0.1\tFALSE\t/\tFALSE\t0\tcsp\t%s\n' "$NINCOOKIE" > $NIN
+code=$(curl -s -o /tmp/nin.html -w '%{http_code}' -b $NIN -c $NIN --max-time 20 "$BASE/hall?c=$CID")
+[ "$code" = "403" ] && { echo "   [PASS] 旧考号进比赛页：403 + 说明页"; PASS=$((PASS+1)); } \
+  || { echo "   [FAIL] 旧考号进比赛页 HTTP $code（应当 403）"; FAIL=$((FAIL+1)); }
+grep -q 'again=1' /tmp/nin.html \
+  && { echo "   [PASS] 那一页的「重新输入考号」带 again=1（能破循环）"; PASS=$((PASS+1)); } \
+  || { echo "   [FAIL] 按钮还是老地址，点了会被会话弹回去（卡死）"; FAIL=$((FAIL+1)); }
+code=$(curl -s -o /tmp/nin2.html -w '%{http_code}' -b $NIN -c $NIN --max-time 20 "$BASE/enter?c=$CID&again=1")
+[ "$code" = "200" ] && grep -q 'name="kaohao"' /tmp/nin2.html \
+  && { echo "   [PASS] 点「重新输入考号」→ 考号输入页（HTTP 200）"; PASS=$((PASS+1)); } \
+  || { echo "   [FAIL] 点它拿到 HTTP $code（应当是 200 的输入页）"; FAIL=$((FAIL+1)); }
+loc=$(curl -s -o /dev/null -b $NIN -c $NIN -w '%{redirect_url}' --max-time 20 "$BASE/hall?c=$CID")
+case "$loc" in *"/enter?c=$CID"*)
+  echo "   [PASS] 会话已清掉：再去比赛页 → 跳登录页（不再是死循环）"; PASS=$((PASS+1)) ;;
+  *) echo "   [FAIL] 会话没清掉，再去比赛页拿到：$loc"; FAIL=$((FAIL+1)) ;;
+esac
+rm -f $NIN /tmp/nin.html /tmp/nin2.html
+
+echo
 echo "=== 管理端页面 ==="
 check "比赛列表"        "$BASE/admin?key=$KEY"
 check "本场管理"        "$BASE/admin?key=$KEY&c=$CID"
