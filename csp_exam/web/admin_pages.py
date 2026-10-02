@@ -1750,14 +1750,45 @@ class AdminPages:
         rule = store.rule_of(contest)
         entry = (store.load_results(cid) or {}).get(kaohao)
         info = store.load_roster(cid).get(kaohao) or {}
-        rank = "—"
-        for r in store.ranking(cid):
-            if r["kaohao"] == kaohao:
-                rank = r["rank"]
-                break
+        # 名次表**只取一次**：名次和下面的「快速换人」下拉都用它
+        # （`include_all=True` = 连没交的学生一起列，顺序与「成绩总表」完全一致；
+        #   加进来的都是 0 分、排在最后，已交学生的名次不受影响）
+        ranked = store.ranking(cid, include_all=True)
+        rank = next((r["rank"] for r in ranked if r["kaohao"] == kaohao), "—")
         back = f'/admin/scores{cid_query(key, cid)}'
+        # 快速换人：这一页一次只看一个学生，老师常常要连着看好几个（查完一个看下一个），
+        # 给个下拉直接跳，省得每次都回「成绩总表」再点进来。顺序就是成绩总表的顺序
+        # （总分从高到低），选项里带着名次/姓名/考号/总分，找人也方便；
+        # 没交的也列出来并标注（点进去会提示"还没有提交"）。
+        picker = ""
+        if len(ranked) > 1:
+            opts, pos = [], 0
+            for i, r in enumerate(ranked, 1):
+                kh = str(r.get("kaohao") or "")
+                if kh == kaohao:
+                    pos = i
+                opts.append(
+                    f'<option value="{html.escape(kh, quote=True)}"'
+                    + (" selected" if kh == kaohao else "")
+                    + f'>第 {r["rank"]} 名 · {html.escape(str(r.get("name") or "?"))}'
+                      f'（{html.escape(kh)}）· {r["total"]} 分'
+                    + ("" if r.get("submitted") else " · 未交")
+                    + '</option>')
+            picker = (
+                '<form method="get" action="/admin/student" class="row" '
+                'style="margin:8px 0;align-items:center;gap:8px">'
+                f'<input type="hidden" name="key" value="{html.escape(key, quote=True)}">'
+                f'<input type="hidden" name="c" value="{html.escape(cid, quote=True)}">'
+                '<span>快速换人</span>'
+                '<select name="k" onchange="this.form.submit()" style="min-width:320px">'
+                + "".join(opts) +
+                '</select>'
+                '<noscript><button type="submit">看这位</button></noscript>'
+                f'<span class="muted">第 {pos} / {len(ranked)} 个</span>'
+                '</form>')
         head = (f'{self._admin_nav(key, cid)}'
                 f'<p><a class="btn btn-gray" href="{back}">← 返回成绩总表</a></p>'
+                + picker +
                 f'<h1>{html.escape(info.get("name", "?"))}'
                 f'<span class="muted"> · {html.escape(kaohao)}</span></h1>'
                 f'<p>{rule_badge(contest)} {level_badge(contest)}'

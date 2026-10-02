@@ -104,6 +104,39 @@ check "比赛列表"        "$BASE/admin?key=$KEY"
 check "本场管理"        "$BASE/admin?key=$KEY&c=$CID"
 check "成绩总表"        "$BASE/admin/scores?key=$KEY&c=$CID"
 check "提交详情"        "$BASE/admin/student?key=$KEY&c=$CID&k=$KH"
+# 单生详情页上的「快速换人」下拉：老师连着看很多个学生，不用回总表再点进来
+curl -s --max-time 20 "$BASE/admin/student?key=$KEY&c=$CID&k=$KH" -o /tmp/_stu.html
+grep -q 'name="k"' /tmp/_stu.html && grep -q 'this.form.submit()' /tmp/_stu.html \
+  && { echo "   [PASS] 单生详情页有「快速换人」下拉（选谁就跳谁）"; PASS=$((PASS+1)); } \
+  || { echo "   [FAIL] 单生详情页没有快速换人下拉"; FAIL=$((FAIL+1)); }
+# 注意用 `grep -o | wc -l` 数**出现次数**：下拉选项是拼在一行里的，
+# `grep -c` 数的是"匹配的行数"，永远只有 1（踩过，白报一次失败）
+NN=$(grep -o '<option value=' /tmp/_stu.html | wc -l)
+NRO=$(cd /root/csp-exam && python3 -c "
+from csp_exam.core import store
+print(len(store.load_roster('$CID')))")
+if [ "$NN" = "$NRO" ] && [ "$NRO" != "0" ]; then
+  echo "   [PASS] 下拉里列全了本场 $NRO 个学生"; PASS=$((PASS+1))
+else
+  echo "   [FAIL] 下拉列了 $NN 个（本场名单 $NRO 个）"; FAIL=$((FAIL+1))
+fi
+grep -q "value=\"$KH\" selected" /tmp/_stu.html \
+  && { echo "   [PASS] 当前这位在下拉里是选中状态（$KH）"; PASS=$((PASS+1)); } \
+  || { echo "   [FAIL] 下拉里没把当前这位选中"; FAIL=$((FAIL+1)); }
+# 换另一位（名单末位）能打开：200 = 交了，404 = 还没交（页面会给提示，都算正常）
+OTH=$(cd /root/csp-exam && python3 -c "
+from csp_exam.core import store
+ks = sorted(store.load_roster('$CID'))
+print(ks[-1] if ks else '')")
+if [ -n "$OTH" ]; then
+  code=$(curl -s -o /tmp/_stu2.html -w '%{http_code}' --max-time 20 \
+         "$BASE/admin/student?key=$KEY&c=$CID&k=$OTH")
+  case "$code" in
+    200|404) echo "   [PASS] 换到另一位（$OTH）能打开（HTTP $code）"; PASS=$((PASS+1)) ;;
+    *) echo "   [FAIL] 换到 $OTH 拿到 HTTP $code"; FAIL=$((FAIL+1)) ;;
+  esac
+fi
+rm -f /tmp/_stu.html /tmp/_stu2.html
 # 找一个真实存在的提交文件来测预览（相对 uploads/<考号>/ 的路径）
 RF=$(cd /root/csp-exam && python3 -c "
 import os
