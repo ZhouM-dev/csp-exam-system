@@ -113,6 +113,28 @@ def main() -> int:
          "没跳转（服务端直接回显失败页）时把那份 HTML 装进来，红框提示不会丢"),
     ):
         check(frag in p.html, label)
+
+    print("=== 3b. 选完文件要能「松手」（Windows 上不松手 = 文件被占用、改不了）===")
+    for frag, label in (
+        ('id="mk-clear"', "有「清空已选文件」按钮"),
+        ("function releasePicks()", "有松手函数"),
+        ("el.value = ''", "松手 = 把文件输入框清空（浏览器才会放掉那些文件）"),
+        ("文件传完了就松手", "文件一传完就自动松手（服务端建题那十几秒里老师就能改文件了）"),
+        ("clearBtn.addEventListener('click', function () { releasePicks(); })",
+         "按钮点了就松手"),
+        ("不再占着这些文件", "松手后给了明确的提示（要重选一次）"),
+        ("选完文件夹之后，浏览器会", "选文件的地方写清了「浏览器会一直占着」这件事"),
+    ):
+        check(frag in p.html, label)
+    check('"folder", "data", "std", "bigsample"' in p.html or
+          "'folder', 'data', 'std', 'bigsample'" in p.html,
+          "松手时会清掉全部四个文件输入框（文件夹/zip/标程/大样例）")
+    check(p.html.count("releasePicks()") >= 3,
+          "松手函数不只定义、还真的被调了（定义 1 次 + 自动/按钮各 1 次，实际 %d 次）"
+          % p.html.count("releasePicks()"))
+    for frag, label in (
+    ):
+        check(frag in p.html, label)
     check("请别关页面" in p.html, "明确告诉老师服务端那段别关页面")
     check("一段没有细粒度进度" in p.html or "没有细粒度进度" in p.html,
           "不吹牛：服务端那段没有百分比就说没有")

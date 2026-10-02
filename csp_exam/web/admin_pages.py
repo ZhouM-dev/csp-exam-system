@@ -2455,6 +2455,13 @@ class AdminPages:
 <p><input type="file" name="folder" id="mk-folder" webkitdirectory directory multiple
         style="padding:10px;background:#f0f9ff;border:1px dashed #38bdf8;border-radius:8px;width:100%"></p>
 <p class="muted">也可以只传一个 zip：<input type="file" name="data" id="mk-zip" accept=".zip"></p>
+<p>
+  <button type="button" class="btn btn-sm btn-gray" id="mk-clear">清空已选文件</button>
+  <span class="muted" id="mk-clear-note">选完文件夹之后，浏览器会<b>一直占着</b>这些文件
+    （在 Windows 上就表现为「文件正在被使用，改不了 / 删不掉」）—— 要在电脑上改文件，
+    先点这个「清空已选文件」，改完再重新选一次就行。<b>点「建题」之后，文件一传完就自动清空</b>，
+    不用管。</span>
+</p>
 <p class="muted">系统按出题工程的结构自动识别，例如：<br>
 <code>题目库/G01-加边后最小生成树/题目.md</code>（题面）、<code>…/标程.cpp</code>（标程）、
 <code>…/data/01.in 01.out</code>（评测数据）、<code>…/大样例/大样例.in/out</code>（大样例，学生可下载）、
@@ -2856,6 +2863,31 @@ class AdminPages:
     }}
     return n;
   }}
+  /* 松手：把选中的文件从浏览器手里放掉。
+     浏览器会**一直占着**你选中的文件（Windows 上就是「文件正在被使用，改不了、删不掉」），
+     直到这份"选择"被丢掉、或者页面被关掉。所以：
+       * 点「建题」之后，**文件一传完就自动松开**（xhr.upload.onload）—— 服务端建题那十几秒
+         你已经在电脑上改文件了，不用等；
+       * 想在传之前就回去改，点「清空已选文件」。
+     松手只是丢掉"选择"，不影响已经发出去的请求（FormData 早就把文件抓下来了）。
+     踩过：老师上传完去改自己的标程，编辑器提示"文件被占用"，一直改不了。 */
+  function releasePicks() {{
+    var names = ['folder', 'data', 'std', 'bigsample'], i, el;
+    for (i = 0; i < names.length; i++) {{
+      el = form.querySelector('input[name=' + names[i] + ']');
+      if (el) {{ try {{ el.value = ''; }} catch (e) {{}} }}
+    }}
+    var out = document.getElementById('mk-detect');
+    if (out) out.innerHTML = '';
+    var note = document.getElementById('mk-clear-note');
+    if (note) {{
+      note.innerHTML = '已松手：浏览器不再占着这些文件，现在就能在电脑上改了。'
+        + '<b>改完记得重新选一次出题文件夹</b>（文件不暂存，重选才能再建）。';
+    }}
+  }}
+  var clearBtn = document.getElementById('mk-clear');
+  if (clearBtn) clearBtn.addEventListener('click', function () {{ releasePicks(); }});
+
   function stop(why) {{
     form.dataset.busy = '';
     if (btn) {{ btn.disabled = false; btn.textContent = '建题并导入评测站'; }}
@@ -2863,8 +2895,10 @@ class AdminPages:
     if (fill) fill.style.width = '0%';
     if (titleEl) titleEl.textContent = '没传成功';
     if (noteEl) {{
+      /* 网络断了这种"没发出去"的情况**不松手**：文件还在选择里，重试一下就行。
+         这会儿真想改文件，上面那个「清空已选文件」随时能点。 */
       noteEl.innerHTML = esc(why) + ' 再点一次「建题并导入评测站」重试；'
-        + '选好的文件还在，不用重新选。';
+        + '选好的文件还在，不用重新选（这会儿想改文件，点上面的「清空已选文件」）。';
     }}
   }}
   function esc(s) {{
@@ -2913,6 +2947,7 @@ class AdminPages:
       }}
     }};
     xhr.upload.onload = function () {{            /* 传输结束，剩下是服务端干活 */
+      releasePicks();                             /* 文件传完了就松手，老师可以马上改文件 */
       if (titleEl) titleEl.textContent = '上传完成，服务端正在建题…';
       if (pctEl) pctEl.textContent = '';
       if (fill) fill.style.width = '100%';
@@ -2920,7 +2955,7 @@ class AdminPages:
       if (noteEl) {{
         noteEl.innerHTML = '正在解包、配对测试点、导入评测站 —— 一道题通常十几秒，'
           + '数据多或题库大时更久。<b>这一段没有细粒度进度，请别关页面、别刷新</b>，'
-          + '跑完会自动跳转。';
+          + '跑完会自动跳转。<br>出题文件夹已经不在浏览器手里了（可以放心去电脑上改文件）。';
       }}
     }};
     xhr.onload = function () {{
