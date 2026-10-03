@@ -38,7 +38,7 @@ from ..core.grading import graded_cell, graded_text
 from ..core.util import log, _fmt_bytes, _fmt_ms, _fmt_kb
 from ..config import (HERE, MAX_PS_UPLOAD, PORT, PS_JOBS, PS_JOBS_LOCK,
                       HYDRO_ADMIN_PW_FILE)
-from .urls import admin_url, cid_query
+from .urls import admin_url, cid_query, statement_url
 from .ui import (page, rule_badge, render_upload_tree_html, md_to_html,
                  level_badge, modal)
 
@@ -2096,6 +2096,7 @@ class AdminPages:
                 f'<td>{sample_cell}</td>'
                 f'<td><button type="button" class="btn btn-sm btn-gray" data-view="{html.escape(pid, quote=True)}">'
                 f'查看题面</button> '
+                f'<a class="btn btn-sm btn-gray" href="{statement_url(key, pid)}">改题面</a> '
                 f'<button type="button" class="btn btn-sm" data-test="{html.escape(pid, quote=True)}">'
                 f'自己测试</button> '
                 f'<form method="post" action="/admin/problem{cid_query(key, "")}" style="display:inline" '
@@ -2116,6 +2117,7 @@ class AdminPages:
                 f'<td class="muted">{html.escape(g["deleted_at"] or "")}</td>'
                 f'<td><button type="button" class="btn btn-sm btn-gray" '
                 f'data-view="{html.escape(g["pid"], quote=True)}">查看题面</button> '
+                f'<a class="btn btn-sm btn-gray" href="{statement_url(key, g["pid"])}">改题面</a> '
                 f'<form method="post" action="/admin/problem{cid_query(key, "")}" style="display:inline">'
                 f'<input type="hidden" name="action" value="restore">'
                 f'<input type="hidden" name="pid" value="{html.escape(g["pid"], quote=True)}">'
@@ -2429,6 +2431,155 @@ class AdminPages:
                 f'{"".join(rows)}</table>'
                 f'<p class="muted" style="margin-bottom:0">题目标识由系统分配，老师不用填；'
                 f'题目编号可以自己定（见下面 ②）。大样例只给学生本机调试，不参与评测。</p></div>')
+
+    def _admin_statement(self, q: dict, flash: str = "", flash_kind: str = "ok"):
+        """**改题面**（已有题目，不用删了重建）：一个 Markdown 编辑框 + 预览 + 保存。
+
+        题面的"真身"在**评测站**那边（题目文档的 `content` 字段，`hydro.problem_statement()`
+        读的就是它）；考试服务这边 `data/statements/<pid>.md` 只是**6 小时缓存**。
+        所以保存要**两处都写**：先写评测站，成功后再把缓存覆盖成新文本 ——
+        只写缓存的话，缓存一过期题面就"自己变回去"了（老师会以为白改了，踩过这个坑的机制见
+        `hydro_client.set_problem_statement` 的注释）。
+
+        编辑时**以评测站上的为准**（`ttl=0` 强制重取）：缓存可能过期、也可能被人手改过，
+        拿缓存当编辑起点会把过期的题面写回去。评测站取不到（容器没起来）时函数会退回缓存，
+        页面顶部会提示。
+        """
+        key = q.get("key", "")
+        if not self._check_admin(key):
+            self._admin_login()
+            return
+        pid = (q.get("pid") or "").strip()
+        info = load_problem_info().get(pid) or {}
+        code = make_problem.code_of_pid(pid) or str(info.get("code") or "")
+        gname = make_problem.name_of_pid(pid) or str(info.get("name") or "")
+        title = str(info.get("title") or "")
+        cache_dir = os.path.join(store.DATA_DIR, "statements")
+        text, warn = "", ""
+        if not pid:
+            warn = "没有指定要改哪道题。"
+        else:
+            try:
+                text = hydro.problem_statement(pid, cache_dir=cache_dir, ttl=0)
+            except Exception as e:                        # noqa: BLE001
+                warn = f"从评测站取题面失败（下面是本地缓存里那份）：{e}"
+                text = self._statement_raw(pid, cache_dir)
+            if not text.strip():
+                warn = warn or ("这道题在评测站上还没有题面 —— 保存之后就有了。")
+                text = self._statement_raw(pid, cache_dir)
+        head_json = _js_json(f'<code>{code or pid}</code> {title}'
+                             + (f' · <code>{gname}</code>' if gname else ''))
+        body = f"""
+{self._admin_nav(key)}
+<p><a class="btn btn-gray" href="{admin_url(key, path='/admin/problems')}">← 题目列表</a></p>
+<h2>改题面</h2>
+{self._flash(flash_kind, flash) if flash else ""}
+{warn and f'<p class="warn">{html.escape(warn)}</p>' or ""}
+<p class="muted">正在改：<b>{html.escape(title or pid)}</b>
+   （题目编号 <b>{html.escape(code or "—")}</b>，英文名 <code>{html.escape(gname or "—")}</code>）<br>
+   学生打开题面页看到的就是这里的内容。<b>保存后立刻生效</b>（评测站那份和本站缓存一起更新）。
+   只改题面 —— 测试数据、时限、标程都不动。</p>
+<form method="post" action="{statement_url(key, pid)}">
+<input type="hidden" name="pid" value="{html.escape(pid, quote=True)}">
+<div class="card">
+  <p style="margin-top:0"><b>题面</b> <span class="muted">（Markdown，支持 $…$ 公式）</span>
+     <button type="button" class="btn btn-sm btn-gray" data-modal-open="pv-modal">预览</button>
+     <span class="muted">　在独立窗口里看学生打开题面时的样子（改题面会实时更新，Esc 关闭）</span></p>
+  <textarea id="stmt-src" name="statement" spellcheck="false"
+            style="min-height:420px">{html.escape(text)}</textarea>
+  <p style="margin-top:14px"><button type="submit">保存题面</button>
+     <span class="muted">（写评测站 + 刷本站缓存）</span></p>
+</div>
+</form>
+{_view_modal()}
+{_math_js()}
+<script>
+/* 预览：与「新建题目」页同一套做法 —— 交给服务端渲染（一份 Markdown 逻辑），
+   预览里看到的和学生看到的才是同一个东西。 */
+(function () {{
+  var src = document.getElementById('stmt-src');
+  var box = document.getElementById('pv-body');
+  var modal = document.getElementById('pv-modal');
+  var head = document.getElementById('pv-head');
+  var timer = null;
+  function draw() {{
+    if (head && !head.innerHTML) head.innerHTML = {head_json};
+    box.innerHTML = '<p class="muted">正在渲染…</p>';
+    var body = new URLSearchParams();
+    body.set('render', '1');
+    body.set('statement', src.value);
+    fetch('{admin_url(key, path='/admin/scan')}', {{ method: 'POST', body: body }})
+      .then(function (r) {{ return r.json(); }})
+      .then(function (d) {{
+        if (!d.ok) {{ box.innerHTML = '<p class="err">' + (d.error || '渲染失败') + '</p>'; return; }}
+        box.innerHTML = d.html || '<p class="muted">（题面还是空的）</p>';
+        cspRenderMath(box);
+      }})
+      .catch(function (e) {{ box.innerHTML = '<p class="err">渲染失败：' + e + '</p>'; }});
+  }}
+  var openBtn = document.querySelector('[data-modal-open=pv-modal]');
+  if (openBtn) openBtn.addEventListener('click', draw);
+  if (src) src.addEventListener('input', function () {{
+    if (!modal || modal.hidden) return;
+    clearTimeout(timer);
+    timer = setTimeout(draw, 400);
+  }});
+}})();
+</script>"""
+        self._send(page(f"改题面 · {title or pid}", body, math=True))
+
+    def _statement_raw(self, pid: str, cache_dir: str) -> str:
+        """只读本地缓存里那份题面原文（Markdown，不渲染）。"""
+        path = os.path.join(cache_dir, f"{pid}.md")
+        if not pid or not os.path.isfile(path):
+            return ""
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+        except OSError:
+            return ""
+
+    def _admin_statement_post(self):
+        """保存题面：**先写评测站**（真身），成功后再把本地缓存覆盖掉。"""
+        q = self._query()
+        key = q.get("key", "")
+        if not self._check_admin(key):
+            self._json({"ok": False, "error": "管理密钥不正确"}, 403)
+            return
+        if make_problem is None:
+            self._redirect(admin_url(key, path="/admin/problem", msg="服务端缺少 make_problem.py"))
+            return
+        form = self._form()
+        pid = (form.get("pid") or q.get("pid") or "").strip()
+        text = form.get("statement") or ""
+        back = statement_url(key, pid)
+        if not pid:
+            self._redirect(admin_url(key, path="/admin/problems", msg="没有指定要改哪道题。"))
+            return
+        r = hydro.set_problem_statement(pid, text)
+        if not r.get("ok"):
+            log(f"[管理端] 改题面失败 {pid}：{r.get('error')}")
+            self._redirect(statement_url(key, pid, msg=f"保存失败：{r.get('error')}（题面没有改动）"))
+            return
+        # 评测站写成功了，再把本站缓存刷成新文本（否则读的还是旧题面）
+        cache_dir = os.path.join(store.DATA_DIR, "statements")
+        wrote_cache = False
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(os.path.join(cache_dir, f"{pid}.md"), "w", encoding="utf-8",
+                      newline="\n") as f:
+                f.write((text or "").replace("\r\n", "\n").replace("\r", "\n"))
+            wrote_cache = True
+        except OSError as e:
+            log(f"[管理端] 改题面 {pid}：评测站写了，但刷本地缓存失败 {e!r}")
+        title = str((load_problem_info().get(pid) or {}).get("title") or pid)
+        log(f"[管理端] 改题面 {pid}（{title}）：评测站 {r.get('field')} 已更新"
+            + ("，本地缓存已刷新" if wrote_cache else "，本地缓存刷新失败"))
+        msg = (f"题面已保存（{title}）—— 学生现在打开题面看到的就是新的了。"
+               if wrote_cache else
+               f"评测站上的题面已更新，但本站缓存没刷上（{title}）—— 最多 6 小时后会自己同步，"
+               f"着急的话重启一下服务。")
+        self._redirect(statement_url(key, pid, msg=msg))
 
     def _admin_problem(self, q: dict, flash: str = "", scan: dict | None = None,
                        flash_kind: str = "ok"):

@@ -20,6 +20,22 @@ def cid_query(key: str, cid: str, kaohao: str = "") -> str:
     return ("?" + "&".join(parts)) if parts else ""
 
 
+def statement_url(key: str, pid: str = "", msg: str = "") -> str:
+    """「改题面」页（`/admin/statement`）的地址：密钥 + 题库标识 + 提示语。
+
+    **别在页面里手拼** `?key=…&pid=…&m=…`：第一个参数用 `?`、后面用 `&`，
+    手拼很容易拼出两个问号（`admin_url` 那段注释记的就是这个坑）。
+    """
+    parts = []
+    if key:
+        parts.append("key=" + urllib.parse.quote(key))
+    if pid:
+        parts.append("pid=" + urllib.parse.quote(pid))
+    if msg:
+        parts.append("m=" + urllib.parse.quote(msg))
+    return "/admin/statement" + (("?" + "&".join(parts)) if parts else "")
+
+
 def admin_url(key: str, cid: str = "", msg: str = "", path: str = "/admin") -> str:
     """管理端跳转用的地址。踩过：直接 "/admin" + cid_query(...) + "?m=" 会拼出两个问号，
     结果 c 变成 "c2?m=..."，消息也丢了。"""

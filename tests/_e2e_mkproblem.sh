@@ -64,6 +64,13 @@ info = load_problem_info()
 gone2 = [p for p in junk if info.pop(p, None)]
 save_problem_info(info)
 print('  清掉题库元信息：', gone2 or '无')
+# 题面缓存（3c 改题面那节会写一份）：一起清掉 —— 留着的话，下次这道题重建出来
+# 会先看到上一轮那份旧题面（缓存 6 小时内优先）
+for p in junk:
+    f = os.path.join('data', 'statements', p + '.md')
+    if os.path.isfile(f):
+        os.remove(f)
+        print('  清掉题面缓存', p)
 store.save_catalog(hydro_client.list_problems())
 print('  c1 题目：', [(p['no'], p['pid']) for p in store.load_exam('c1').get('problems', [])])
 print('  剩余比赛：', [c['title'] for c in store.list_contests()])
@@ -264,6 +271,35 @@ for okv, label in checks:
 PY
 
 echo
+echo "=== 3c. 改题面：已有题目不用删也能改（评测站 + 本站缓存一起更新）==="
+# 题面的**真身**在评测站（题目文档的 content 字段），本站 data/statements/<pid>.md 只是缓存。
+# 所以保存必须两处都写：只写缓存 → 6 小时后被冲掉；只写评测站 → 学生立刻看到的还是旧的。
+NEWSTMT="## 改过的题面（验收）
+
+这是一次「改题面」验收，题目 $PID。
+标记串：ZM-STATEMENT-OK"
+curl -s -o /dev/null -w '  POST /admin/statement -> HTTP %{http_code}\n' --max-time 90 \
+  -X POST "$BASE/admin/statement?key=$KEY&pid=$PID" \
+  --data-urlencode "pid=$PID" --data-urlencode "statement=$NEWSTMT"
+python3 - <<PY
+import io
+import os
+from csp_exam.core import hydro_client as hydro, store
+pid = '$PID'
+live = hydro.problem_statement(pid, cache_dir='', ttl=0)          # 评测站那份（ttl=0 强取）
+cache = os.path.join(store.DATA_DIR, 'statements', pid + '.md')
+cached = io.open(cache, encoding='utf-8').read() if os.path.isfile(cache) else ''
+print('  评测站那份 %d 字 / 本站缓存 %d 字' % (len(live), len(cached)))
+checks = [
+    ('ZM-STATEMENT-OK' in live, '评测站上的题面已更新（真身写了）'),
+    ('ZM-STATEMENT-OK' in cached, '本站缓存也刷了（不刷的话 6 小时后会被冲掉）'),
+    ('改过的题面（验收）' in live and '改过的题面（验收）' in cached, '两边是同一份新题面'),
+]
+for okv, label in checks:
+    print('   [%s] %s' % ('PASS' if okv else 'FAIL', label))
+PY
+
+echo
 echo "=== 4. 题目确实进了站点（题库缓存也已刷新）==="
 python3 - <<PY
 import os
@@ -345,6 +381,13 @@ p = (e.get('problems') or {}).get('T1') or {}
 print('  成绩：', p.get('score'), '分，', p.get('status_text'), '，提交 %s 次' % p.get('tries'))
 raise SystemExit(0 if int(p.get('score') or 0) == 100 else 1)
 " && pass "新题判分正常（学生交文件夹交标程得 100）" || fail "新题判分异常"
+
+# 改过的题面：学生打开题面看到的就是新的那份（走的是本站缓存那条路 ——
+# 只写评测站不刷缓存的话，这里看到的还是旧题面）
+curl -s -b $J --max-time 20 "$BASE/problem?c=$NC&p=1" -o $T/stu_stmt.html
+grep -q 'ZM-STATEMENT-OK' $T/stu_stmt.html \
+  && pass "学生题面页显示的是改过之后的题面（改题面端到端通了）" \
+  || fail "学生题面页还是旧题面"
 
 echo
 echo "=== 5c. 删除题目（「题目列表」每行的删除按钮）==="

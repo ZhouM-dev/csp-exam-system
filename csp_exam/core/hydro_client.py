@@ -660,6 +660,60 @@ def problem_statement(pid: str, cache_dir: str = "", ttl: int = 6 * 3600) -> str
     return text
 
 
+def set_problem_statement(pid: str, text: str) -> dict:
+    """**改题面**：把 Markdown 原文写回评测站题目文档的 `content` 字段。
+
+    题面的"真身"在评测站那边（`problem_statement()` 读的就是它），考试服务这边
+    `data/statements/<pid>.md` 只是**缓存**。所以改题面必须写回评测站，否则缓存一过期
+    （6 小时）就会把老师的修改"冲掉"、题面自己变回去。
+
+    `content` 有两种形状，都要照顾到（别把多语言的另一份挤掉）：
+      * 字符串      —— 直接 `$set: {content: 新文本}`
+      * `{zh: ...}` —— 只改 `content.zh` 这一个键（用点路径，保留其它语言）
+
+    文本**先 base64 再拼进 JS**：题面里有引号/反斜杠/换行/中文都很正常，
+    直接拼字符串要么转义出错、要么把命令撑爆（base64 只占 4/3，且全是 ASCII）。
+
+    返回 `{"ok", "field", "modified", "error"}`；`ok=False` 时 `error` 给人看。
+    """
+    import base64
+    pid = str(pid or "").strip()
+    if not pid:
+        return {"ok": False, "error": "没有指定题目标识"}
+    # 换行统一成 \n：`problem_statement()` 读的时候本来就经过一轮"通用换行"归一
+    # （容器文本模式把 \r\n 收成 \n），这里跟着归一，于是"读出来原样存回去"= 真的没改动
+    # （不然每次保存都会因为换行风格被算成一次修改）。Markdown 不看换行风格，安全。
+    text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    js = (
+        "(() => {"
+        f' const key = {{docType:10, pid:{json.dumps(pid)}}};'
+        " const d = db.document.findOne(key, {content:1});"
+        ' if (!d) return {ok:false, error:"评测站上没有这道题"};'
+        f' const t = Buffer.from("{b64}", "base64").toString("utf8");'
+        ' let field = "content";'
+        ' const c = d.content;'
+        ' if (c && typeof c !== "string") {'
+        '   field = "content." + (Object.prototype.hasOwnProperty.call(c, "zh")'
+        '                         ? "zh" : (Object.keys(c)[0] || "zh"));'
+        ' }'
+        ' const patch = {}; patch[field] = t;'
+        ' const r = db.document.updateOne(key, {$set: patch});'
+        ' return {ok: r.matchedCount === 1, field: field, modified: r.modifiedCount};'
+        "})()"
+    )
+    try:
+        data = _mongosh_json(js, timeout=60)
+    except HydroError as e:
+        return {"ok": False, "error": f"写回评测站失败：{e}"}
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "写回评测站没有返回结果（容器没起来？）"}
+    if not data.get("ok"):
+        return {"ok": False, "error": str(data.get("error") or "写回评测站失败")}
+    return {"ok": True, "field": str(data.get("field") or "content"),
+            "modified": int(data.get("modified") or 0)}
+
+
 # ------------------------------------------------------------------ 题目数据文件（补输入/答案）
 
 #: 单个文件的读取上限（超过就截断）

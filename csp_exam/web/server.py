@@ -268,6 +268,9 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         # T-09 新增的两条：题目列表（新页）/ 取某个测试点的详情（弹窗用 JSON）
         if path in ("/admin/problems", "/admin/testcase"):
             return self._admin_problems(q) if path == "/admin/problems" else self._api_testcase(q)
+        if path == "/admin/statement":          # 改题面（已有题目）
+            self._admin_statement(q, flash=q.get("m", ""))
+            return
         if path.startswith("/static/katex/"):
             self._serve_static(path, "/static/katex/",
                                os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -416,6 +419,9 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             return
         if path == "/admin/problem":
             self._admin_problem_post()
+            return
+        if path == "/admin/statement":          # 改题面：保存
+            self._admin_statement_post()
             return
         # T-09 新增的两条：识别出题文件夹（自动填表 / 题面预览）、自己测试（跑全部测试点）
         if path in ("/admin/scan", "/admin/selftest"):

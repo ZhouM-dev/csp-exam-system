@@ -174,6 +174,41 @@ def main() -> int:
     except Exception as e:                                   # noqa: BLE001
         check(False, "题目列表渲染炸了：%r" % (e,))
 
+    print("=== 7. 「改题面」页（已有题目，不删也能改）===")
+    from csp_exam.core import hydro_client                       # noqa: E402
+    # 本地没有 docker：`problem_statement` 会取不到评测站，退回本地缓存那份（正好够验渲染）
+    pid = ""
+    for cand in sorted(os.listdir(os.path.join(WORK, "data", "statements"))
+                       if os.path.isdir(os.path.join(WORK, "data", "statements")) else []):
+        if cand.endswith(".md"):
+            pid = cand[:-3]
+            break
+    if not pid:
+        print("   本地没有题面缓存，跳过（有 data/statements/*.md 才测得动）")
+    else:
+        s = Stub()
+        try:
+            s._admin_statement({"key": "test-key", "pid": pid})
+            check(s.status == 200, "改题面页渲染 200（题目 %s）" % pid)
+            for frag, label in (
+                (f'name="pid" value="{pid}"', "表单带着题目标识（保存时知道改的是哪道）"),
+                ('name="statement"', "有题面编辑框"),
+                ('id="stmt-src"', "编辑框 id 与预览脚本对得上"),
+                ('data-modal-open="pv-modal"', "有「预览」按钮（复用学生的题面渲染）"),
+                ("保存题面", "有保存按钮"),
+                ("写评测站 + 刷本站缓存", "按钮旁写清了保存会写哪两处"),
+                ('id="pv-body"', "预览浮窗的落点在"),
+            ):
+                check(frag in s.html, label)
+            cached = P.__dict__ and open(
+                os.path.join(WORK, "data", "statements", f"{pid}.md"), encoding="utf-8").read()
+            check(cached[:40] in s.html or not cached.strip(),
+                  "编辑框里预填了当前题面（不拿空白框当起点）")
+            check(s.html.count("{{") == 0 and s.html.count("}}") == 0,
+                  "页面里没有残留的双花括号（f-string 没写坏）")
+        except Exception as e:                                   # noqa: BLE001
+            check(False, "改题面页渲染炸了：%r" % (e,))
+
     print()
     print("================== 结果：%d 项通过，%d 项失败 ==================" % (PASS, FAIL))
     return 0 if FAIL == 0 else 1

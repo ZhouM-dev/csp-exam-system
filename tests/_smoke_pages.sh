@@ -35,6 +35,21 @@ check() {   # $1=说明 $2=url $3=jar(可空)
   fi
 }
 
+run_checker() {   # $1 = 子检查脚本的绝对路径
+  # 子脚本自己打印 [PASS]/[FAIL]，这里按行数计入总数。
+  # **一个字都没打印就算失败**（踩过：脚本崩了却只让总数少了 3 项，看汇总还以为全绿）。
+  local out
+  out=$(python3 "$1" 2>&1)
+  printf '%s\n' "$out" | grep -E '\[(PASS|FAIL)\]' | sed 's/^/  /'
+  PASS=$((PASS + $(printf '%s\n' "$out" | grep -cE '\[PASS\]' || true)))
+  FAIL=$((FAIL + $(printf '%s\n' "$out" | grep -cE '\[FAIL\]' || true)))
+  if ! printf '%s\n' "$out" | grep -qE '\[(PASS|FAIL)\]'; then
+    echo "   [FAIL] 子检查脚本没有输出结果：$(basename "$1")"
+    printf '%s\n' "$out" | tail -5 | sed 's/^/      /'
+    FAIL=$((FAIL+1))
+  fi
+}
+
 echo "=== 学生端页面（考号 $KH，比赛 $CID）==="
 check "考试入口"        "$BASE/enter?c=$CID"
 check "比赛列表页"      "$BASE/contests" "$J"
@@ -59,17 +74,29 @@ esac
 
 echo
 echo "=== 已登录学生点别的考场链接（不能无限重定向）==="
-n=$(curl -s -o /root/csp-exam/tests/tmp/enter2.html -b $J -L --max-redirs 6 \
-      -w '%{num_redirects}' --max-time 20 "$BASE/enter?c=c2")
-if [ "$n" = "0" ]; then
-  echo "   [PASS] /enter?c=别的考场 不重定向（显示该场登录页）"; PASS=$((PASS+1))
+# 「别的考场」**动态挑一场**，别写死 c2 —— 老师会删测试场/建新场，
+# 写死的场次一旦不存在，这几条就会误报失败（踩过：c2 被删之后这里红了一整轮，
+# 查半天才发现是测试数据变了，不是代码坏了）。一场都不剩就跳过。
+CID2=$(python3 -c "
+from csp_exam.core import store
+cs = [c['id'] for c in store.list_contests()]
+print(next((c for c in cs if c != '$CID'), ''))")
+if [ -z "$CID2" ]; then
+  echo "   [跳过] 只有一场考试，测不了「点别的考场链接」"
 else
-  echo "   [FAIL] /enter?c=别的考场 跳了 $n 次"; FAIL=$((FAIL+1))
+  echo "  （用另一场：$CID2）"
+  n=$(curl -s -o /root/csp-exam/tests/tmp/enter2.html -b $J -L --max-redirs 6 \
+        -w '%{num_redirects}' --max-time 20 "$BASE/enter?c=$CID2")
+  if [ "$n" = "0" ]; then
+    echo "   [PASS] /enter?c=别的考场 不重定向（显示该场登录页）"; PASS=$((PASS+1))
+  else
+    echo "   [FAIL] /enter?c=别的考场 跳了 $n 次"; FAIL=$((FAIL+1))
+  fi
+  grep -q '考号' /root/csp-exam/tests/tmp/enter2.html \
+    && { echo "   [PASS] 显示的是考号输入页"; PASS=$((PASS+1)); } \
+    || { echo "   [FAIL] 页面不是登录页"; FAIL=$((FAIL+1)); }
+  check "跨场访问 hall"   "$BASE/hall?c=$CID2" "$J"
 fi
-grep -q '考号' /root/csp-exam/tests/tmp/enter2.html \
-  && { echo "   [PASS] 显示的是考号输入页"; PASS=$((PASS+1)); } \
-  || { echo "   [FAIL] 页面不是登录页"; FAIL=$((FAIL+1)); }
-check "跨场访问 hall"   "$BASE/hall?c=c2" "$J"
 
 echo
 echo "=== 「不在名单里」不能把人卡死（学生反馈：点「重新输入考号」没反应）==="
@@ -165,16 +192,9 @@ check "名单分组"        "$BASE/admin/groups?key=$KEY"
 check "新建题目"        "$BASE/admin/problem?key=$KEY"
 check "题目列表（新页）" "$BASE/admin/problems?key=$KEY"
 # 页面 200 不代表那两个按钮能用（都是点开才发的 POST，且 JS 会因为缺元素整段死掉）
-# 这个脚本自己打印 [PASS]/[FAIL] 行，这里按行数计入总数
-VS_OUT=$(python3 /root/csp-exam/tests/_check_viewstmt.py 2>&1)
-printf '%s\n' "$VS_OUT" | grep -E '\[(PASS|FAIL)\]' | sed 's/^/  /'
-PASS=$((PASS + $(printf '%s\n' "$VS_OUT" | grep -cE '\[PASS\]' || true)))
-FAIL=$((FAIL + $(printf '%s\n' "$VS_OUT" | grep -cE '\[FAIL\]' || true)))
-if ! printf '%s\n' "$VS_OUT" | grep -qE '\[(PASS|FAIL)\]'; then
-  echo "   [FAIL] 查看题面/自己测试的检查脚本没有输出结果"
-  printf '%s\n' "$VS_OUT" | tail -5 | sed 's/^/      /'
-  FAIL=$((FAIL+1))
-fi
+run_checker /root/csp-exam/tests/_check_viewstmt.py
+# 「改题面」：题目列表每行要有入口，编辑页要能打开并预填当前题面
+run_checker /root/csp-exam/tests/_check_statement.py
 check "考号表"          "$BASE/admin/print?key=$KEY&c=$CID"
 check "题目清单接口"    "$BASE/api/problems?key=$KEY"
 # 文档页要**真的渲染成网页**：踩过一次「把 Markdown 原文整个倒进 <pre>」——
