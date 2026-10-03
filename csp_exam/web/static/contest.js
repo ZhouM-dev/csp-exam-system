@@ -171,3 +171,86 @@
     document.body.style.overflow = '';
   });
 })();
+
+
+/* ============================================================
+   代码块「一键复制」按钮（学生端和老师端都用得着）
+
+   为什么用脚本注入，而不是在每个页面写按钮：代码块在两个端有十来处 ——
+   学生：交卷回执/文件预览、查成绩里的「你交的代码」；老师：提交详情里的
+   「原始代码」「编译报错」、某测试点的「输入 / 学生输出 / 标准答案」……
+   注入一次全都覆盖，以后新加的 <pre class="code-view"> 也自动有。
+
+   两个坑记着：
+   1. **行号不在这个 <pre> 里**（见 ui.code_pre：行号是另起一列），
+      所以 textContent 就是纯代码，复制出来不会带行号。
+   2. 线上是 **http**（非安全上下文），`navigator.clipboard` 用不了 ——
+      必须有 `execCommand('copy')` 这条老路兜底，并按它的返回值报"已复制"。
+   ============================================================ */
+(function () {
+  function copyText(text, done) {
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(function () { done(true); },
+                                               function () { done(false); });
+      return;
+    }
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    document.body.removeChild(ta);
+    done(ok);
+  }
+
+  function addButtons(root) {
+    var pres = (root || document).querySelectorAll('pre.code-view');
+    Array.prototype.forEach.call(pres, function (pre) {
+      if (pre.getAttribute('data-copy') === '1') return;
+      pre.setAttribute('data-copy', '1');
+      var bar = document.createElement('div');
+      bar.className = 'code-copy-bar';
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-sm btn-gray';
+      btn.textContent = '复制代码';
+      btn.addEventListener('click', function () {
+        copyText(pre.textContent || '', function (ok) {
+          btn.textContent = ok ? '已复制 ✓' : '复制失败：请手动选中';
+          setTimeout(function () { btn.textContent = '复制代码'; }, ok ? 1500 : 2600);
+        });
+      });
+      // 按钮放在代码块**上面**（右对齐）：放里面会压住第一行代码。
+      // 注意：行号那种结构里 `<pre>` 外面还套着 `.code-flex`（行号 + 代码两列），
+      // 必须插到**那个容器**前面 —— 直接插到 pre 前面，按钮会变成 flex 的第三个格子，
+      // 于是"夹在行号和代码中间"竖着排（踩过，截图里一眼就看出来）。
+      var holder = pre;
+      if (pre.closest) {
+        var flex = pre.closest('.code-flex');
+        if (flex) holder = flex;
+      }
+      holder.parentNode.insertBefore(bar, holder);
+      bar.appendChild(btn);
+    });
+  }
+
+  window.cspAddCopyButtons = addButtons;
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { addButtons(); });
+  } else {
+    addButtons();
+  }
+  // 悬浮窗里的代码（输入/输出/标准答案、原始代码）是后来才填进去的，得盯着点
+  if (window.MutationObserver) {
+    var timer = null;
+    new MutationObserver(function () {
+      clearTimeout(timer);
+      timer = setTimeout(function () { addButtons(); }, 150);
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  }
+})();

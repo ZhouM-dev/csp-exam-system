@@ -162,7 +162,8 @@ def main() -> int:
     check("_mk.is_deleted(p)" in imp, "题单导入也认这个记号（假删除的不算占用）")
     check("return _problem_doc_id(pid) == \"\"" in imp.replace("'", "\""),
           "删题后**复查**：查不到了才算删掉")
-    check("failed.append(\"评测站题目\")" in src, "彻底删除删不掉时报错，不报假成功")
+    # 判题换成本地之后，「彻底删除」清的是**本地题目数据**，删不掉时要如实报错
+    check("failed.append(\"本地题目数据\")" in src, "彻底删除删不掉时报错，不报假成功")
 
     print("=== 6. 「题目列表」页也还渲染得出来（删除/恢复/彻底删除都在这页上）===")
     s = Stub()

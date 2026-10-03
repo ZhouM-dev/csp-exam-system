@@ -126,7 +126,8 @@ def main() -> int:
         CUR["released"] = False
         p = render(ME)
         check(p.status == 200 and "成绩还没有公布" in p.html, "只给「成绩还没有公布」")
-        check("逐题明细" not in p.html and "你交的代码" not in p.html, "没有明细、没有代码")
+        check("<h2>逐题明细</h2>" not in p.html and "<b>你交的代码</b>" not in p.html,
+              "没有明细、没有代码（查的是 h2/加粗标记，别被内联 JS 里的注释骗了）")
 
         print("=== 2. 已公布 + 看自己：逐点情况 + 自己交的代码 ===")
         CUR["released"] = True
@@ -141,12 +142,20 @@ def main() -> int:
               "能看到**自己交的代码**（原文里带了 freopen）")
         check("candy.cpp" in p.html, "标了是哪一份文件")
         check("学生程序的输出评测机不保存" in p.html, "说明了「没有你的输出」这件事，不让人误会")
+        # 复制按钮：代码块的**正文**里不能有行号（行号是另起一列），
+        # 否则「复制代码」粘出来会带 `  1  ` 这种前缀（踩过）
+        body = p.html.split('class="code-view code-numbered code-body">', 1)
+        check(len(body) == 2, "代码是独立的正文块（行号另起一列）")
+        if len(body) == 2:
+            first = body[1].split("\n", 1)[0]
+            check(not first.lstrip().startswith("1  "), "正文第一行没有被塞进行号：%r" % first[:40])
+        check("cspAddCopyButtons" in p.html, "页面里带了「复制代码」按钮的脚本（共享 JS 内联）")
 
         print("=== 3. 已公布 + 查别人：只给分数，不给代码/明细 ===")
         p = render(ME, OTHER)
         check(p.status == 200 and "乙同学" in p.html, "能看到对方的总分表（分数本来就是公开的）")
-        check("你交的代码" not in p.html, "**看不到对方的代码**")
-        check("逐题明细" not in p.html, "**看不到对方的逐点明细**")
+        check("<b>你交的代码</b>" not in p.html, "**看不到对方的代码**")
+        check("<h2>逐题明细</h2>" not in p.html, "**看不到对方的逐点明细**")
 
         print("=== 4. 登录着直接进查成绩：不用再手输考号 ===")
         p = render(ME)
