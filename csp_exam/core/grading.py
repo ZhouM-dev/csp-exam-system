@@ -26,7 +26,7 @@ import traceback
 from .util import log, _fmt_ms, _fmt_kb
 from . import wrapper
 from ..config import JUDGE_SLOTS
-from . import store, hydro_client as hydro
+from . import store, hydro_client as hydro, judgelocal, localoj
 
 # ------------------------------------------------------------------ 逐点明细
 
@@ -364,35 +364,34 @@ def _apply_result(cid: str, kaohao: str, prob_no: int, row: dict, *, best_of: bo
 
 
 def ensure_account(cid: str, kaohao: str) -> dict:
-    """确保这个考号在评测站有账号（没有就现建），返回本场名册里的记录。
+    """返回本场名册里这个考号的记录（**历史名字保留**）。
 
-    账号是**按需创建**的：导入名单时不再给全班每人启动一次 Hydro 进程
-    （那会把小机器压垮），改到学生第一次提交判分时再建。
+    以前这一步要在评测站给学生建账号（判分要拿账号提交给 Hydro）；判题换成
+    go-judge 之后，判分是在本机沙箱里跑的，**不需要任何账号**了。
+    保留函数名与返回形状，调用点不用改；名册里已有的 `uid`/`pw` 字段留着不动
+    （老数据，删了也没意义）。
     """
-    roster = store.load_roster(cid)
-    info = roster.get(kaohao)
+    info = store.load_roster(cid).get(kaohao)
     if not info:
         raise hydro.HydroError("考号不在本场名单里")
-    if info.get("uid"):
-        return info
-    uid = hydro.create_user(info.get("uname") or kaohao, info["pw"])
-    roster = store.load_roster(cid)
-    if kaohao in roster:
-        roster[kaohao]["uid"] = uid
-        store.save_roster(cid, roster)
-        info = roster[kaohao]
-    log(f"[判分] 建账号 {info.get('uname')}（{info.get('name')}）uid={uid}")
     return info
 
 
 def judge_csp(cid: str, kaohao: str, picked: dict, exam: dict) -> None:
-    """三种赛制共用的判分：交文件夹、逐题提交到评测机。picked = {题号: 相对路径}。
+    """三种赛制共用的判分：交文件夹、逐题判。picked = {题号: 相对路径}。
+
+    **判题在本地跑**（`core/judgelocal.py` + go-judge 沙箱），不再提交给 Hydro：
+    以前是「改学生的代码（freopen 垫片）→ 提交给评测机 → 读回记录」，
+    现在是「原样编译学生的代码 → 在沙箱里逐点跑 → 自己按 CSP 口径比对」。
+    最大的差别是 **I/O 口径由我们定**（`io_mode`），同一份代码不会再因为
+    "包不包垫片"判出两个结果 —— 老师反馈过的那个差异就是这么来的。
 
     **赛制差异只在这里分叉**（别再把它们混成一套）：
 
-    * `freopen`（只有 CSP 为真）—— CSP 要在提交前给代码包一层 freopen 垫片，
-      因为评测机只喂 stdin；OI/IOI 学生按题面要求写的是**标准输入输出**，
-      包装了反而会把 stdin 读空、拿 0 分（线上踩过）。
+    * `freopen`（只有 CSP 为真）—— CSP 用 `auto` 口径：程序自己 `freopen` 写的
+      `<英文名>.out` 优先，没写就用标准输出（与旧垫片行为一致，老提交重测不会大变）。
+      OI/IOI 用 `stdin` 口径：只喂标准输入，沙箱里**不放**输入文件
+      （学生按题面写的就是标准输入输出）。
     * `best_of`（只有 IOI 为真）—— IOI 每题取多次提交的最高分，交一份更差的不该覆盖。
 
     函数名沿用 `judge_csp` 是历史原因（调用点在 student_pages 里）。
@@ -401,14 +400,9 @@ def judge_csp(cid: str, kaohao: str, picked: dict, exam: dict) -> None:
     if not info:
         log(f"[{cid}/{kaohao}] 不在本场名单里，跳过判分")
         return
-    try:
-        info = ensure_account(cid, kaohao)
-    except hydro.HydroError as e:
-        log(f"[{cid}/{kaohao}] 建账号失败，跳过判分：{e}")
-        return
-    # 本场的赛制规则：决定「要不要 freopen 包装」和「怎么计分」
+    # 本场的赛制规则：决定「I/O 口径」和「怎么计分」
     rule = store.rule_of(store.get_contest(cid) or {})
-    need_wrap = bool(rule.get("freopen"))
+    io_mode = "auto" if rule.get("freopen") else "stdin"
     best_of = bool(rule.get("best_of"))
     # 判分是异步的：老师可能在判分过程中把这场比赛删了。照旧写回会把
     # data/contests/<cid>/ 重新建出来，变成一个「不在索引里、界面上看不到」的孤儿目录。
@@ -424,12 +418,9 @@ def judge_csp(cid: str, kaohao: str, picked: dict, exam: dict) -> None:
     store.put_result(cid, kaohao, entry)
 
     base_dir = store.upload_dir(cid, kaohao)
-    record_map: dict[str, tuple[int, str, str]] = {}
-    meta: dict[int, tuple[str, int]] = {}
     for prob in exam.get("problems", []):
         no = int(prob["no"])
         code, full = store.code_of(prob), int(prob.get("full") or 0)
-        meta[no] = (code, full)          # 等结果回来时还要用（按点给分要满分、转存要题号）
         rel = (picked or {}).get(no)
         if not rel:
             continue
@@ -441,8 +432,9 @@ def judge_csp(cid: str, kaohao: str, picked: dict, exam: dict) -> None:
             log(f"[{cid}/{kaohao}] 第{no}题读取源码失败：{e}")
             continue
         ext = os.path.splitext(rel)[1]
-        # freopen 提示只对 CSP 有意义（OI/IOI 本来就该用标准输入输出）
-        hint = wrapper.check_freopen(source, code) if need_wrap else ""
+        # freopen 提示只对 CSP 有意义（OI/IOI 本来就该用标准输入输出）：
+        # 现在**不改学生代码**了，这条提示纯粹是给老师看日志用的
+        hint = wrapper.check_freopen(source, code) if rule.get("freopen") else ""
         if hint:
             log(f"[{cid}/{kaohao}] {code} {hint}")
         # best_of 每个调用点都要显式传：漏一个就是 TypeError，判分线程静默死掉、
@@ -452,24 +444,12 @@ def judge_csp(cid: str, kaohao: str, picked: dict, exam: dict) -> None:
                                            "note": f"暂不支持 {ext} 语言，请用 .cpp 提交"},
                           best_of=best_of, file_rel=rel, code=code, full=full)
             continue
-        try:
-            payload = wrapper.wrap(source, code) if need_wrap else source
-            rid = hydro.submit(info.get("uname") or kaohao, info["pw"],
-                           prob["pid"], payload, ext)
-            record_map[rid] = (no, rel, hint)
-        except hydro.HydroError as e:
-            log(f"[{cid}/{kaohao}] 第{no}题提交失败：{e}")
-            _apply_result(cid, kaohao, no, {"status": 8, "score": 0, "note": str(e)},
-                          best_of=best_of, hint=hint, file_rel=rel, code=code, full=full)
-
-    if record_map:
-        rows = hydro.wait_records(list(record_map.keys()))
-        for rid, (no, rel, hint) in record_map.items():
-            row = dict(rows.get(rid, {}))
-            row["record_id"] = rid
-            code, full = meta.get(no, ("", 0))
-            _apply_result(cid, kaohao, no, row, best_of=best_of, hint=hint, file_rel=rel,
-                          code=code, full=full)
+        pid = str(prob.get("pid") or "")
+        t_ms, mem_mb = judgelocal.limits_of(pid)
+        row = judgelocal.judge_source(pid, source, ext, code=code, full=full,
+                                      time_ms=t_ms, memory_mb=mem_mb, io_mode=io_mode)
+        _apply_result(cid, kaohao, no, row, best_of=best_of, hint=hint, file_rel=rel,
+                      code=code, full=full)
     log(f"[{cid}/{kaohao}] {rule.get('key', '')} 判分完成")
 
 
@@ -504,11 +484,9 @@ def judge_code(cid: str, kaohao: str, prob: dict, source: str, ext: str,
     try:
         if not wrapper.can_wrap(ext):
             raise hydro.HydroError(f"暂不支持 {ext} 语言，请用 .cpp 提交")
-        rid = hydro.submit(info.get("uname") or kaohao, info["pw"],
-                           prob["pid"], source, ext, lang=lang)
-        rows = hydro.wait_records([rid])
-        row = dict(rows.get(rid, {}))
-        row["record_id"] = rid
+        # 判题在本地跑（go-judge 沙箱），不再往评测站提交
+        row = localoj.judge(prob["pid"], source, ext, code=code, full=full,
+                            io_mode="auto" if rule.get("freopen") else "stdin")
     except hydro.HydroError as e:
         # 评测机忙/出错也要落盘，否则成绩表会一直卡在"判题中"
         _apply_result(cid, kaohao, no, {"status": 8, "score": 0, "note": str(e)},

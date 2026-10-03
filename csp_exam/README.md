@@ -323,7 +323,7 @@ contests/<比赛id>/
 **改完代码/文档要跑的验收**（都在服务器上，`cd /root/csp-exam` 后执行）：
 
 ```bash
-python3 csp_exam/tools/run_selftests.py     # 包内自测：6 套 167 项，约 1 秒，不需要 docker
+python3 csp_exam/tools/run_selftests.py     # 包内自测：6 套 163 项，约 1 秒，不需要 docker
 bash tests/_smoke_pages.sh                  # 全路由冒烟：52 项，约 2 秒
 bash tests/_regress_all.sh --quick          # 上面两项（约 4 秒）
 bash tests/_regress_all.sh                  # 全量：再加 7 套端到端（约 10 分钟）

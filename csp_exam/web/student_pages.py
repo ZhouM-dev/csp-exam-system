@@ -29,7 +29,7 @@ import time
 import urllib.parse
 import html
 
-from ..core import grading, hydro_client as hydro, store, wrapper
+from ..core import grading, hydro_client as hydro, localoj, store, wrapper
 from ..core.security import make_cookie
 from ..core import problems as make_problem
 from ..core.util import log, _fmt_bytes
@@ -803,7 +803,7 @@ class StudentPages:
         full = int(prob.get("full", 100))
         cache_dir = os.path.join(store.DATA_DIR, "statements")
         try:
-            text = hydro.problem_statement(pid, cache_dir)
+            text = localoj.problem_statement(pid, cache_dir)
         except Exception as e:                     # noqa: BLE001
             log(f"[题面] 读取 {pid} 失败：{e}")
             text = ""

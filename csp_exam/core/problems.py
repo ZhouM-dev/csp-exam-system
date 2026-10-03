@@ -22,7 +22,8 @@ import shutil
 import time
 import zipfile
 
-from . import importer as ip
+from . import importer as ip, localoj
+from . import judgelocal as judge_local
 
 PROBLEM_YAML = """title: {title}
 pid: {pid}
@@ -764,7 +765,7 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
 
     # 标识被占（不管那道题是不是已经被假删除）就自动换一个 —— **不再拒绝建题**。
     # 老师要的是"能建重复的题"，而且假删除过的题在系统里本来就不该再挡路。
-    on_site = ip.hydro_problem_pids() if on_site is None else on_site
+    on_site = localoj.problem_pids() if on_site is None else on_site
     exists = pid in on_site
     pid_from = ""
     if exists and not overwrite:
@@ -785,17 +786,16 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
         return {"ok": False, "error": str(e), "pid": pid, "number": "", "name": "",
                 "code": "", "notes": notes, "cases": len(cases)}
 
-    work = os.path.join(ip.HOST_IMPORT_DIR, "_mk")
-    os.makedirs(work, exist_ok=True)
-    root = build_package(work, pid, title, cases, files, time_ms=time_ms,
-                         memory_mb=memory_mb, statement=statement,
-                         std_source=std_source, tags=tags)
-    if exists:
-        ip.hydro_delete_problem(pid)
-    # before=on_site：万一评测站没按这个标识建题（标识不合它的规矩），
-    # 它会把错误信息带回来，并顺手清掉评测站自动建的那道（见 hydro_import）
-    ok, err = ip.hydro_import(pid, ip._container_path(ip.HOST_IMPORT_DIR + "/_mk"),
-                              before=on_site)
+    # ---- 题目数据**落到本地题目库**（不再打包推给评测站）
+    # 以前这一段的顺序是：先在导入目录拼出题目包 → `hydrooj cli problem import` 推上去
+    # → 数据在评测站、我们只留一份题面缓存。判题换成 go-judge 之后反过来：
+    # 数据就在 `data/problems/<pid>/testdata/`，题面就在 `data/statements/<pid>.md`，
+    # 本地是**唯一正本**（判题引擎直接读它，见 core/judgelocal.py）。
+    try:
+        judge_local.store_problem(pid, cases, statement=statement)
+        ok, err = True, ""
+    except OSError as e:
+        ok, err = False, f"写本地题目数据失败：{e}"
     out = {
         "ok": ok, "error": err, "pid": pid, "title": title,
         "number": number,                       # 题目编号（老师侧）：T00001
@@ -804,7 +804,9 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
         "cases": len(cases), "case_names": [c["name"] for c in cases],
         "no_answer": [c["name"] for c in cases if not c.get("out")],
         "notes": notes, "problems": problems,
-        "overwritten": bool(exists), "package": root,
+        # `package` 以前指向评测站导入目录里的题目包；现在数据就在本地题目库，
+        # 保留这个字段名、指向本地那份（调用方只是记日志/验收里看一眼）
+        "overwritten": bool(exists), "package": judge_local.cases_dir(pid),
         # 原来的标识：只在这道题**因为重名而改了内部标识**时才有值，
         # 调用方拿它给老师一句「站点上已有 G01，这份记作 G01-2」
         "pid_from": pid_from,
@@ -853,7 +855,7 @@ def create_bundle(uploads: dict[str, bytes], *, time_ms: int = DEFAULT_TIME_MS,
         if only and prob["pid"] not in only:
             continue
         if on_site is None and not overwrite:
-            on_site = ip.hydro_problem_pids()
+            on_site = localoj.problem_pids()
         got = create_problem(prob["pid"], prob["title"], files,
                              time_ms=time_ms, memory_mb=memory_mb,
                              statement=statement, overwrite=overwrite, tags=tags,
@@ -874,9 +876,12 @@ def create_bundle(uploads: dict[str, bytes], *, time_ms: int = DEFAULT_TIME_MS,
 
 
 def ip_hydro_list() -> list[dict]:
-    """重新读一遍站点题库（给缓存刷新用）。"""
-    from . import hydro_client
-    return hydro_client.list_problems()
+    """题库清单（给缓存刷新用）。
+
+    **名字是历史遗留**（以前从评测站读）；判题换成本地的 go-judge 之后，
+    题库就是本机的题目库了，所以这里直接给本地清单 —— 调用点全都不用改。
+    """
+    return localoj.list_problems()
 
 
 if __name__ == "__main__":      # 手工调试用

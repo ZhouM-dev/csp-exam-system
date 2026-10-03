@@ -31,7 +31,7 @@ import time
 import urllib.parse
 import html
 
-from ..core import hydro_client as hydro, problems as make_problem, store
+from ..core import hydro_client as hydro, judgelocal, localoj, problems as make_problem, store
 from ..core import importer as import_problemset
 from ..core import wrapper
 from ..core.grading import graded_cell, graded_text
@@ -767,7 +767,7 @@ class AdminPages:
         results = store.load_results(cid)
         problems = []
         try:
-            problems = hydro.list_problems()
+            problems = localoj.list_problems()
         except hydro.HydroError as e:
             flash = self._flash("err", f"读取题目列表失败：{e}")
 
@@ -1202,28 +1202,10 @@ class AdminPages:
 
     def _create_accounts(self, cid: str, unames: list[str]):
         """后台给本场学生开评测站账号（限速串行，一个建完再建下一个）。"""
-        def work():
-            for uname in unames:
-                if not uname:
-                    continue
-                roster = store.load_roster(cid)
-                hit = [k for k, v in roster.items() if v.get("uname") == uname]
-                if not hit:
-                    continue
-                kaohao = hit[0]
-                info = roster[kaohao]
-                if info.get("uid"):
-                    continue
-                try:
-                    uid = hydro.create_user(uname, info["pw"])
-                    roster = store.load_roster(cid)
-                    if kaohao in roster:
-                        roster[kaohao]["uid"] = uid
-                        store.save_roster(cid, roster)
-                    log(f"[管理端] 建账号 {uname}（{info.get('name')}）uid={uid}")
-                except hydro.HydroError as e:
-                    log(f"[管理端] 建账号 {uname} 失败：{e}")
-        threading.Thread(target=work, daemon=True).start()
+        # 判题不用评测站账号了（本地沙箱跑），所以这一步**没有事要做**：
+        # 函数与接口保留，只是立刻返回 —— 老师的操作流程（点「建账号」）不用变，
+        # 页面上也不会再冒出"账号建失败"这类跟判题无关的报错。
+        log(f"[管理端] 本场 {cid} 无需建评测站账号（判题在本地沙箱跑）：{len(unames)} 个考号跳过")
 
     def _admin_accounts(self):
         """提前把本场名单的评测站账号都建好（后台限速执行，可以随时做别的事）。"""
@@ -1482,7 +1464,7 @@ class AdminPages:
         old = {str(p.get("pid")): p for p in exam.get("problems", [])}
         titles = {}
         try:
-            titles = {str(p["pid"]): p["title"] for p in hydro.list_problems()}
+            titles = {str(p["pid"]): p["title"] for p in localoj.list_problems()}
         except hydro.HydroError:
             pass
 
@@ -1972,7 +1954,7 @@ class AdminPages:
         err = ""
         if not items:
             try:
-                items = hydro.list_problems()
+                items = localoj.list_problems()
                 store.save_catalog(items)
             except (hydro.HydroError, OSError) as e:
                 err = f"读取评测站题库失败：{e}"
@@ -2023,7 +2005,7 @@ class AdminPages:
                 text = ""
         if not text.strip() and fetch:
             try:
-                text = hydro.problem_statement(pid, cache_dir)
+                text = localoj.problem_statement(pid, cache_dir)
             except Exception as e:                   # noqa: BLE001（评测站闹脾气不该让整页打不开）
                 log(f"[题目列表] 取题面 {pid} 失败：{e}")
                 text = ""
@@ -2243,7 +2225,7 @@ class AdminPages:
             try:
                 # 落盘的逐点数据里序号叫 `no`（"01"），原始记录里叫 `id`；两个都试。
                 # read_problem_case 内部会 int()，"01" 与 1 等价。
-                f_in, f_ans = hydro.read_problem_case(
+                f_in, f_ans = localoj.read_problem_case(
                     prob.get("pid"), case.get("id") or case.get("no"))
                 c_in = c_in or f_in
                 c_ans = c_ans or f_ans
@@ -2278,23 +2260,28 @@ class AdminPages:
         })
 
     def _submit_as_admin(self, pid: str, source: str, ext: str = ".cpp") -> tuple[bool, str, dict]:
-        """以评测站管理员身份提交一份代码，返回 (是否成功, 错误说明, 评测记录行)。
+        """跑一份代码的**全部测试点**，返回 (是否成功, 错误说明, 结果行)。
 
-        「自己测试」和建题后的「标程自测」都走这里：管理员账号在评测站是现成的，
-        不用临时建账号（`admin_key` 那套是考试服务自己的）。
+        「自己测试」和建题后的「标程自测」都走这里。名字是历史遗留（以前"以评测站
+        管理员身份提交"）；判题换成本机沙箱之后，这里就是**本地判一遍** ——
+        结果行的形状（`status` / `testcases` / `time` / `memory`）与旧的评测记录一致，
+        所以下面渲染逐点明细的代码原样能用。
         """
+        rec = load_problem_info().get(pid) or {}
+        code = make_problem.code_of_pid(pid) or str(rec.get("name") or "") or "main"
+        full = 100                      # 「自己测试」看的是点数与用时，满分按 100 折算
         try:
-            with open(HYDRO_ADMIN_PW_FILE, encoding="utf-8") as f:
-                pw = f.read().strip()
-        except OSError:
-            return False, ("读不到评测站管理员密码（" + HYDRO_ADMIN_PW_FILE +
-                           "），没法自动测试；可以到评测站题目页手动提交标程。"), {}
-        try:
-            rid = hydro.submit("admin", pw, pid, source, ext)
-            row = dict((hydro.wait_records([rid], timeout_s=300) or {}).get(rid, {}))
-        except hydro.HydroError as e:
-            return False, f"提交失败（{e}）", {}
-        row["record_id"] = rid
+            row = localoj.judge(pid, source, ext, code=code, full=full, io_mode="auto")
+        except Exception as e:                                # noqa: BLE001
+            return False, f"判题失败（{e}）", {}
+        if row.get("note"):
+            # 编译不过 / 本机没这道题的数据：直接当失败回报，并把编译器报错原文带上
+            # （老师最需要看的就是这个 —— 整改清单 1.7 的要求）
+            msg = str(row["note"])
+            cerr = row.get("compilerTexts") or []
+            if cerr:
+                msg += "：\n" + "\n".join(str(x) for x in cerr)[:800]
+            return False, msg, row
         return True, "", row
 
     def _selftest_verdict(self, cases: list, time_ms: int, passed: int, total: int,
@@ -2376,7 +2363,7 @@ class AdminPages:
         err = ""
         if refresh or not items:
             try:
-                items = hydro.list_problems()
+                items = localoj.list_problems()
                 store.save_catalog(items)
                 cat = store.load_catalog()
             except hydro.HydroError as e:
@@ -2435,7 +2422,7 @@ class AdminPages:
     def _admin_statement(self, q: dict, flash: str = "", flash_kind: str = "ok"):
         """**改题面**（已有题目，不用删了重建）：一个 Markdown 编辑框 + 预览 + 保存。
 
-        题面的"真身"在**评测站**那边（题目文档的 `content` 字段，`hydro.problem_statement()`
+        题面的"真身"在**评测站**那边（题目文档的 `content` 字段，`localoj.problem_statement()`
         读的就是它）；考试服务这边 `data/statements/<pid>.md` 只是**6 小时缓存**。
         所以保存要**两处都写**：先写评测站，成功后再把缓存覆盖成新文本 ——
         只写缓存的话，缓存一过期题面就"自己变回去"了（老师会以为白改了，踩过这个坑的机制见
@@ -2460,7 +2447,7 @@ class AdminPages:
             warn = "没有指定要改哪道题。"
         else:
             try:
-                text = hydro.problem_statement(pid, cache_dir=cache_dir, ttl=0)
+                text = localoj.problem_statement(pid, cache_dir=cache_dir, ttl=0)
             except Exception as e:                        # noqa: BLE001
                 warn = f"从评测站取题面失败（下面是本地缓存里那份）：{e}"
                 text = self._statement_raw(pid, cache_dir)
@@ -2556,7 +2543,7 @@ class AdminPages:
         if not pid:
             self._redirect(admin_url(key, path="/admin/problems", msg="没有指定要改哪道题。"))
             return
-        r = hydro.set_problem_statement(pid, text)
+        r = localoj.set_problem_statement(pid, text)
         if not r.get("ok"):
             log(f"[管理端] 改题面失败 {pid}：{r.get('error')}")
             self._redirect(statement_url(key, pid, msg=f"保存失败：{r.get('error')}（题面没有改动）"))
@@ -3259,16 +3246,13 @@ class AdminPages:
             return
         title = str((load_problem_info().get(pid) or {}).get("title") or pid)
         done, failed = [], []
+        # **本地题目数据**（测试点 + 题面）：这一版起这两样才是正本，删掉才算真删
         try:
-            # 返回 True = 已经**复查确认**评测站上查不到这道题了（见 importer.hydro_delete_problem）。
-            # 以前这里不看结果，删失败也照样跟老师说"已彻底删除"，回头站点上还看得见（踩过）。
-            if import_problemset is not None and import_problemset.hydro_delete_problem(pid):
-                done.append("评测站题目")
-            else:
-                failed.append("评测站题目")
+            gone = judgelocal.drop_problem_data(pid)
+            done.extend(f"本地{g}" for g in gone)
         except Exception as e:                                     # noqa: BLE001
-            log(f"[管理端] 彻底删题 {pid}：评测站删除失败 {e!r}")
-            failed.append("评测站题目")
+            log(f"[管理端] 彻底删题 {pid}：删本地题目数据失败 {e!r}")
+            failed.append("本地题目数据")
         codes = make_problem.load_codes()
         if pid in codes:
             codes.pop(pid)
@@ -3285,18 +3269,17 @@ class AdminPages:
             done.extend(cache_gone)
         # 题库缓存也刷新一下，别再列出这道题
         try:
-            store.save_catalog(hydro.list_problems())
+            store.save_catalog(localoj.list_problems())
         except (hydro.HydroError, OSError) as e:
             log(f"[管理端] 彻底删题 {pid}：刷新题库缓存失败 {e!r}")
         log(f"[管理端] 彻底删除题目 {pid}（{title}），清掉了：{'、'.join(done) or '无（本来就没有）'}"
             + (f"；**没删掉**：{'、'.join(failed)}" if failed else ""))
         if failed:
-            # 本地痕迹都清了，但评测站上还留着 —— 如实说，并给出还能怎么办
+            # 本地删不干净（权限/占用之类）：如实说，别报"已彻底删除"
             self._redirect(admin_url(key, path="/admin/problems", msg=(
-                f"「{pid}」（{title}）本地记录已清掉，但**评测站上的题目没能删掉**"
-                f"（{'、'.join(failed)}）—— 多半是评测站没起来或命令超时。"
-                f"它还会出现在题库里，可以过一会儿再点一次「彻底删除」；"
-                f"不影响建题（重名会自动换内部标识）。")))
+                f"「{pid}」（{title}）**没能删干净**：{'、'.join(failed)}。"
+                f"多半是文件被占用或权限不对，可以过一会儿再点一次「彻底删除」。"
+                f"（登记里的信息已经清掉了，所以它不会再出现在列表里。）")))
             return
         self._redirect(admin_url(key, path="/admin/problems", msg=(
             f"已彻底删除题目 {pid}（{title}）" +
