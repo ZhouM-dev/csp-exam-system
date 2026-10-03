@@ -236,6 +236,14 @@
       }
       holder.parentNode.insertBefore(bar, holder);
       bar.appendChild(btn);
+      // 代码列竖着滚的时候，行号列跟着滚 —— 否则数字停在原地、跟代码错位
+      var gut = pre.closest ? pre.closest('.code-flex') : null;
+      if (gut) {
+        gut = gut.querySelector('.code-gutter');
+        if (gut) {
+          pre.addEventListener('scroll', function () { gut.scrollTop = pre.scrollTop; });
+        }
+      }
     });
   }
 

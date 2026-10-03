@@ -150,6 +150,13 @@ def main() -> int:
             first = body[1].split("\n", 1)[0]
             check(not first.lstrip().startswith("1  "), "正文第一行没有被塞进行号：%r" % first[:40])
         check("cspAddCopyButtons" in p.html, "页面里带了「复制代码」按钮的脚本（共享 JS 内联）")
+        # 行号列必须**固定宽度 + 限高裁掉溢出**：被拉伸就成了代码框左边的大黑框，
+        # 不限高则行号会溢出到代码框外面（老师截图上都出现过）
+        check(".code-gutter{flex:none;max-height:520px" in p.html or
+              ".code-gutter{flex:none;max-height:520px" in p.html,
+              "行号列的 CSS 是固定宽度 + 限高")
+        check(".code-flex pre{margin:0" in p.html and "overflow:visible" not in p.html.split(".code-flex pre{")[1].split("}")[0],
+              "通用 pre 规则里没有 overflow（否则盖掉行号列的 hidden）")
 
         print("=== 3. 已公布 + 查别人：只给分数，不给代码/明细 ===")
         p = render(ME, OTHER)
