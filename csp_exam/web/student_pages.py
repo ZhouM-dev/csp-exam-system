@@ -32,7 +32,7 @@ import html
 from ..core import grading, hydro_client as hydro, localoj, store, wrapper
 from ..core.security import make_cookie
 from ..core import problems as make_problem
-from ..core.util import log, _fmt_bytes
+from ..core.util import log, _fmt_bytes, _fmt_ms, _fmt_kb
 from ..config import MAX_UPLOAD, NOTICE_DOC
 from .multipart import _read_zip
 from .urls import cid_query
@@ -771,10 +771,12 @@ class StudentPages:
         out = [self._nav(me, cid, name=store.student_name(cid, me)) if me else "",
                f'<form method="get" action="/score"><input type="hidden" name="c" value="{cid}">'
                '<p>输入考号查成绩：</p>'
-               f'<input type="text" name="kaohao" value="{html.escape(kaohao_input)}">'
+               f'<input type="text" name="kaohao" value="{html.escape(kaohao_input or me)}">'
                '<p style="margin-top:12px"><button type="submit">查询</button></p></form>']
-        if kaohao_input:
-            k = kaohao_input.strip().upper()
+        # 登录状态（会话就是本场）时**直接看自己的** —— 不用再手输一遍考号
+        want = kaohao_input.strip().upper() or (self._student(cid) or "")
+        if want:
+            k = want
             res = store.load_results(cid).get(k)
             if k not in store.load_roster(cid) or not res:
                 out.append(self._flash("err", f"没有找到考号 {k} 的提交记录。"))
@@ -786,7 +788,87 @@ class StudentPages:
                 out.append(f'<div class="card"><p><b>{html.escape(store.student_name(cid, k))}</b>（{k}）</p>'
                            f'<table><tr><th>题目</th><th>得分</th></tr>{rows}</table>'
                            f'<p style="font-size:20px;margin-top:12px"><b>总分：{store.entry_total(res)}</b></p></div>')
+                # 逐点明细 + 自己交的代码：**只给本人**（别人的代码不互相看）
+                if k == (self._student(cid) or ""):
+                    out.append(self._my_detail_html(cid, exam, k, res))
         self._send(page("查成绩", "".join(out)))
+
+    def _my_detail_html(self, cid: str, exam: dict, kaohao: str, res: dict) -> str:
+        """公布成绩之后，学生自己能看到：**逐测试点的情况** + **自己交的代码**。
+
+        为什么只给本人：分数在老师公布之后是公开的（谁多少分），但这页要展开的是
+        「哪一点错了、错在哪」以及**本人交的源码** —— 那是学生自己的东西，不该互相看。
+        判定在调用点：查的考号 == 会话里的考号才给。
+
+        学生输出评测机不保存（和老师那边一样），所以逐点里没有「你的输出」这一栏，
+        页面上写明了这句，免得学生以为页面坏了。逐点内容来自判分时落盘的 `testcases`
+        （本地判题引擎写的：每点状态/用时/内存/失败说明）。
+        """
+        out = ['<h2>逐题明细</h2>',
+               '<p class="muted" style="margin-top:-4px">下面是你自己这一场的结果，按<b>测试点</b>'
+               '列出来：过了几个点就拿到这几个点的分。某个点没过，先看「说明」那一栏'
+               '（超时 / 内存 / 答案错都能看出来）。</p>']
+        for prob in exam.get("problems", []):
+            no = int(prob["no"])
+            key = store.problem_dir_name(no)
+            got = (res.get("problems") or {}).get(key) or {}
+            code_name = store.code_of(prob)
+            full = int(prob.get("full") or 0)
+            cases = got.get("testcases") or []
+            passed = sum(1 for c in cases if int(c.get("status") or 0) == 1)
+            head = (f'{html.escape(code_name)}（第 {no} 题 · '
+                    f'{html.escape(str(prob.get("title") or ""))}）—— '
+                    f'<b>{int(got.get("score") or 0)}</b> / {full} 分')
+            if cases:
+                head += f'，{passed} / {len(cases)} 个测试点通过'
+            pts = []
+            for i, c in enumerate(cases, 1):
+                st = int(c.get("status") or 0)
+                cls = "ok" if st == 1 else ("part" if int(c.get("score") or 0) > 0 else "err")
+                when = _fmt_ms(c.get("time")) if c.get("time") is not None else "—"
+                mem = _fmt_kb(c.get("memory")) if c.get("memory") is not None else "—"
+                pts.append(f'<tr><td>#{i}</td>'
+                           f'<td class="{cls}">{html.escape(str(c.get("status_text") or "—"))}</td>'
+                           f'<td class="muted">{html.escape(when)}</td>'
+                           f'<td class="muted">{html.escape(mem)}</td>'
+                           f'<td class="muted">{html.escape(str(c.get("message") or ""))}</td></tr>')
+            tbl = ('<table style="margin-top:8px"><tr><th style="width:8%">点</th>'
+                   '<th style="width:20%">结果</th><th style="width:14%">用时</th>'
+                   '<th style="width:16%">内存</th><th>说明</th></tr>' + "".join(pts)
+                   + '</table>') if pts else '<p class="muted">这一题没有逐点记录（可能没交）。</p>'
+            out.append(f'<details class="card" style="margin-top:10px">'
+                       f'<summary style="cursor:pointer"><b>{head}</b></summary>'
+                       f'{tbl}{self._my_source_html(cid, kaohao, got)}</details>')
+        out.append('<p class="muted">学生程序的输出评测机不保存，所以逐点里没有「你的输出」'
+                   '那一栏；想知道差在哪，拿自己的代码在本机对着大样例跑一遍最快。</p>')
+        return "".join(out)
+
+    def _my_source_html(self, cid: str, kaohao: str, got: dict) -> str:
+        """学生自己这一道题交上去的源码（只给本人看）。"""
+        rel = str(got.get("file") or "")
+        if not rel:
+            return '<p class="muted">这一题没有记录到提交的文件。</p>'
+        # 这份 `file` 到底是"考号文件夹里那一段"还是"整段带考号前缀"？**别猜** ——
+        # 线上两种都有（实测 164 条带前缀、19 条不带）。三种拼法都试，取第一个真存在的：
+        #   ① uploads/<考号>/ 里再拼一遍（老记录常见写法：整段带前缀）
+        #   ② uploads/<考号>/<考号>/…（防"路径里已经带了考号"的另一种写法）
+        #   ③ 相对 uploads/（不带前缀的那批）
+        # 踩过：只按一种拼，页面显示"找不到你交的文件"，而文件其实好好躺着。
+        base = store.upload_dir(cid, kaohao)
+        cands = [os.path.join(base, rel),
+                 os.path.join(base, kaohao, rel),
+                 os.path.join(os.path.dirname(base), rel)]
+        path = next((p for p in cands if os.path.isfile(p)), cands[0])
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                src = f.read()
+        except OSError:
+            return f'<p class="muted">找不到你交的文件：<code>{html.escape(rel)}</code></p>'
+        if len(src) > 200000:
+            src = src[:200000] + "\n…（文件太长，只显示前 200KB）"
+        return (f'<p style="margin-top:12px"><b>你交的代码</b>'
+                f'<span class="muted">（{html.escape(rel)}）</span></p>'
+                + code_pre(src))
 
     def _problem_page(self, kaohao: str, contest: dict, cid: str, pno: str):
         """看题面（Markdown 从评测站读，带本地缓存）。
