@@ -34,9 +34,6 @@ from ..core.security import make_cookie
 from ..core import problems as make_problem
 from ..core.util import log, _fmt_bytes, _fmt_ms, _fmt_kb
 
-#: 大样例在页面上最多显示多少行（整份麻烦点「下载」；与老师端测试点详情同一个口径）
-_SAMPLE_LINES = 15
-
 from ..config import MAX_UPLOAD, NOTICE_DOC
 from .multipart import _read_zip
 from .urls import cid_query
@@ -907,29 +904,6 @@ class StudentPages:
             body = nav + head + f'<div class="card stmt">{md_to_html(text)}</div>'
         self._send(page(f"题面 · {slug}", body, math=True))
 
-    def _sample_text(self, pid: str, name: str) -> tuple:
-        """读一个样例文件，返回 `(要显示的前 N 行, 被藏起来的行数)`。
-
-        读不了/不像文本（含 NUL 字节）就返回 `(None, 0)` —— 调用方只摆「下载」。
-        只显示前 `_SAMPLE_LINES` 行：大样例动辄几千行，整份铺在页面上又卡又难看，
-        要整份本来就有「下载」（和老师端测试点详情同一个口径）。
-        """
-        path = make_problem.sample_path(pid, name) if make_problem else None
-        if not path:
-            return None, 0
-        try:
-            with open(path, "rb") as f:
-                raw = f.read(4 * 1024 * 1024)
-        except OSError:
-            return None, 0
-        if b"\x00" in raw:
-            return None, 0
-        text = raw.decode("utf-8", "replace")
-        lines = text.splitlines()
-        if len(lines) > _SAMPLE_LINES:
-            return "\n".join(lines[:_SAMPLE_LINES]), len(lines) - _SAMPLE_LINES
-        return text, 0
-
     def _sample_page(self, kaohao: str, contest: dict, cid: str, pno: str, want: str = ""):
         """学生看/下载本场某题的大样例（模拟 CSP 里可以查看大样例）。"""
         exam = store.load_exam(cid)
@@ -960,11 +934,12 @@ class StudentPages:
         if not info.get("items"):
             self._send(page("大样例", nav + self._flash("err", "这道题没有提供大样例文件。")), 404)
             return
+        # 只列文件 + 下载，**不在页面上渲染样例内容**（老师要求回退这一版：
+        # 大样例动辄几十万行/几 MB，铺在页面上又重又慢，学生本地打开文件更合适）。
         blocks = []
         for it in info["items"]:
             kind = "大样例" if it.get("kind") == "big" else "题目样例"
-            label = html.escape(str(it.get("label", "")))
-            rows, panels = [], []
+            rows = []
             for f in it["files"]:
                 role = {"in": "输入", "out": "答案", "other": "附件"}.get(f.get("role"), "文件")
                 size = _fmt_bytes(f.get("size") or 0)
@@ -972,29 +947,11 @@ class StudentPages:
                 rows.append(f'<tr><td>{html.escape(f["name"])}</td><td>{role}</td>'
                             f'<td class="muted">{size}</td>'
                             f'<td><a class="btn btn-sm" href="{url}">下载</a></td></tr>')
-                # 输入/答案顺便**渲染出来**：点开就能看，不用先下载再打开文件。
-                # 布局与老师端「测试点详情」同一个样式（kv 行 + 标题 + <pre class="code-view">），
-                # 所以两边看起来是一回事；代码块上会自动多出「复制代码」按钮
-                # （共享脚本注入，见 static/contest.js）—— 学生拿去本机测最方便。
-                if f.get("role") in ("in", "out"):
-                    text, hidden = self._sample_text(pid, f["name"])
-                    if text is not None:
-                        head = "输入数据" if f.get("role") == "in" else "标准答案"
-                        note = (f'（{html.escape(f["name"])} · 共 {hidden + _SAMPLE_LINES} 行，'
-                                f'这里只显示前 {_SAMPLE_LINES} 行，要整份点右边「下载」）'
-                                if hidden else f'（{html.escape(f["name"])}）')
-                        panels.append(f'<h3 style="font-size:15px;margin:16px 0 6px">{head}'
-                                      f' <span class="muted">{note}</span></h3>'
-                                      f'<pre class="code-view">{html.escape(text)}</pre>')
-            inner = ("".join(panels) if panels else
-                     '<p class="muted">这一组没有能直接预览的文本（可能是附件或二进制文件），'
-                     '点「下载」看吧。</p>')
             blocks.append(
-                f'<details class="card"><summary style="cursor:pointer"><b>{kind}</b>'
-                f' <span class="muted">{label} —— 点开看输入与答案（和老师看到的一样）</span>'
-                f'</summary>'
-                f'<table style="margin-top:10px"><tr><th>文件</th><th>用途</th><th>大小</th><th></th></tr>'
-                f'{"".join(rows)}</table>{inner}</details>')
+                f'<div class="card"><h2 style="margin-top:0">{kind}'
+                f'<span class="muted"> {html.escape(it.get("label", ""))}</span></h2>'
+                f'<table><tr><th>文件</th><th>用途</th><th>大小</th><th></th></tr>'
+                f'{"".join(rows)}</table></div>')
         body = (nav +
                 f'<p>{rule_badge(contest)} {level_badge(contest)}'
                 f' <b>{html.escape(contest["title"])}</b>'
