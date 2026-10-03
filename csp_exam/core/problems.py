@@ -549,9 +549,17 @@ def unpack(files: dict[str, bytes]) -> tuple[dict[str, bytes], list[str]]:
     """
     out: dict[str, bytes] = {}
     notes: list[str] = []
+    # 上传里**已经有目录结构**（选了整个出题文件夹）时，里面的 zip 一律**不当数据**：
+    # 出题文件夹里常带着 `XX-洛谷上传.zip`（或别的备份包），那是给别的平台用的，
+    # 展开它会把同一个题目认成两道（踩过：老师从本机工具传题，识别到 2 道、还都写盘失败）。
+    # 单独传一个 zip（手选打包好的题）时没有目录结构，照旧展开。
+    has_dirs = any("/" in k.replace("\\", "/").strip("/") for k in files)
     for name, data in files.items():
         clean = name.replace("\\", "/").lstrip("/")
         if clean.lower().endswith(".zip"):
+            if has_dirs:
+                notes.append(f"{clean} 是压缩包，里面已经有整个文件夹了，跳过它")
+                continue
             try:
                 with zipfile.ZipFile(io.BytesIO(data)) as z:
                     for info in z.infolist():

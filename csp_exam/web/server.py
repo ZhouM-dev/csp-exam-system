@@ -37,10 +37,30 @@ from .admin_pages import AdminPages
 class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
     """请求入口：会话/表单/JSON 这些基础工具在这里，具体页面见两个 mixin。"""
 
+    def _cors_headers(self) -> None:
+        """跨源请求（本机的出题工具 `file://` 页面）要用的响应头。
+
+        **只对管理接口开**（`/admin`、`/api`）：那个本机工具是 file:// 打开的，
+        它 fetch 传题目时浏览器会拿 `Origin: null` 来问，响应里没有
+        `Access-Control-Allow-Origin` 就把结果吞掉、只报一句 CORS 错，
+        老师根本看不出上传成没成。学生端页面不开这个口子（没人会跨源调它）。
+        安全性靠**管理密钥**（URL 里的 key），不靠同源策略。
+        """
+        origin = self.headers.get("Origin")
+        path = urllib.parse.urlparse(self.path).path
+        if not origin or not (path.startswith("/admin") or path.startswith("/api")):
+            return
+        self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Vary", "Origin")
+
     def _send(self, body: bytes, status: int = 200, cookie: str = "") -> None:
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._cors_headers()
         if cookie:
             self.send_header("Set-Cookie", cookie)
         self.end_headers()
@@ -49,6 +69,7 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
     def _redirect(self, to: str, cookie: str = "") -> None:
         self.send_response(302)
         self.send_header("Location", to)
+        self._cors_headers()
         if cookie:
             self.send_header("Set-Cookie", cookie)
         self.send_header("Content-Length", "0")
@@ -59,6 +80,7 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self._cors_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -202,6 +224,13 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         except Exception:
             log("处理 GET 出错：\n" + traceback.format_exc())
             self._send(page("出错了", self._flash("err", "服务器内部错误，请稍后重试。")), 500)
+
+    def do_OPTIONS(self):
+        """CORS 预检：只回头部、不做事。"""
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self._cors_headers()
+        self.end_headers()
 
     def do_POST(self):
         try:
