@@ -515,7 +515,7 @@ document.addEventListener("DOMContentLoaded", function () {
 <meta name="viewport" content="width=device-width,initial-scale=1">{r}{math_head}{contest_head}
 <title>{html.escape(title)}</title><style>{CSS}</style></head><body>
 <div class="wrap">{nav}<h1>{html.escape(title)}</h1>{body}
-<p class="muted" style="margin-top:34px">CSP 训练站 · 评测由 Hydro 提供</p>
+<p class="muted" style="margin-top:34px">CSP 训练站 · 判题由本机 go-judge 沙箱提供</p>
 </div>{math_script}</body></html>""".encode("utf-8")
 
 
