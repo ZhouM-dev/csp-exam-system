@@ -19,14 +19,199 @@ from __future__ import annotations
 
 
 import html
+import copy
+import hashlib
+from pathlib import Path
 import os
 import re
 import time
 import traceback
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from .util import log, _fmt_ms, _fmt_kb
 from . import wrapper
-from ..config import JUDGE_SLOTS
-from . import store, hydro_client as hydro, judgelocal, localoj
+from ..config import MAX_JUDGE_QUEUE
+from . import store, judge_result as verdict, judgelocal, localoj, submissions
+
+_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="csp-judge")
+_QUEUE_SLOTS = threading.BoundedSemaphore(MAX_JUDGE_QUEUE)
+
+
+def reserve_submission() -> bool:
+    return _QUEUE_SLOTS.acquire(blocking=False)
+
+
+def release_submission() -> None:
+    _QUEUE_SLOTS.release()
+
+
+def enqueue_submission(cid, kaohao, picked, exam, submission_id, *, reserved=False):
+    if not reserved and not reserve_submission():
+        raise ValueError("评测队列已满，请稍后再提交。")
+
+    def work():
+        try:
+            for attempt in range(3):
+                if not safe_judge_csp(cid, kaohao, picked, exam, submission_id):
+                    break
+                if attempt < 2:
+                    time.sleep(1)
+        finally:
+            release_submission()
+    try:
+        return _EXECUTOR.submit(work)
+    except Exception:
+        release_submission()
+        raise
+
+
+def recover_submissions():
+    """服务重启后恢复当前未完成提交，不重新评测已完成的历史成绩。"""
+    for contest in store.list_contests():
+        cid = contest["id"]
+        for kaohao, entry in store.load_results(cid).items():
+            sid = entry.get("submission_id")
+            # 历史资料缺失不是临时沙箱错误，重启不能把它重新排队并误认证为完成。
+            if sid and not entry.get("rejudge_error") and entry.get("submission_state") in ("queued", "judging", "error"):
+                _QUEUE_SLOTS.acquire()
+                picked = {int(k): v for k, v in (entry.get("picked") or {}).items()}
+                enqueue_submission(cid, kaohao, picked, entry.get("submission_exam") or store.load_exam(cid), sid, reserved=True)
+
+
+def _rejudge_sources(cid, kaohao, entry, exam):
+    """重测只归档源码；历史生成的 exe/输入输出不参与上传配额。"""
+    base = store.upload_dir(cid, kaohao)
+    if store.rule_of(store.get_contest(cid)).get("best_of"):
+        # 满分是可证明的最高分上界；非满分不能由留存的单份源码推断历史最高。
+        files, picked, renamed = {}, {}, {}
+        for prob in exam.get("problems", []):
+            no, code = int(prob["no"]), store.code_of(prob)
+            rel = str((entry.get("problems", {}).get(store.problem_dir_name(no)) or {}).get("file") or "")
+            if not rel:
+                raise ValueError("IOI 缺少计分提交源码和完整历史，无法重建最高分")
+            original = submissions.confined_file(base, rel)
+            with open(original, "rb") as source:
+                data = source.read()
+            name = code + "/" + code + Path(rel).suffix
+            if name in files:
+                raise ValueError("IOI 题目英文名重复，源码路径冲突")
+            files[name], picked[no], renamed[name] = data, name, rel
+        return submissions.clean_files(files), picked, [], renamed
+    previous = entry.get("picked") or {}
+    roots = {str(v).split("/")[1] for v in previous.values()
+             if str(v).startswith("__submissions/") and len(str(v).split("/")) > 2}
+    if len(roots) > 1:
+        raise ValueError("最后交卷快照不一致")
+    sid = entry.get("submission_id") or ""
+    if re.fullmatch(r"[a-f0-9]{32}", sid) and os.path.isdir(os.path.join(base, "__submissions", sid)):
+        roots = {sid}
+    root = submissions.confined_file(base, "__submissions/" + next(iter(roots))) if roots else base
+    if not os.path.isdir(root):
+        raise ValueError("最后交卷快照已丢失")
+    # 随机考号迁移保留的用户名是可信旧考号来源；只调整最外层目录。
+    uname = str(store.load_roster(cid).get(kaohao, {}).get("uname", ""))
+    alias = uname[len(cid) + 1:] if uname.startswith(cid + "-") else uname
+    aliases = {alias} if re.fullmatch(r"[A-Z]+-[A-Z0-9]+", alias) else set()
+    files, renamed = {}, {}
+    for folder, dirs, names in os.walk(root, followlinks=False):
+        dirs[:] = [d for d in dirs if d != "__submissions"]
+        if any(os.path.islink(os.path.join(folder, d)) for d in dirs):
+            raise ValueError("源码目录包含符号链接")
+        for name in names:
+            if os.path.splitext(name)[1].lower() not in wrapper.SOURCE_EXTS:
+                continue
+            rel = os.path.relpath(os.path.join(folder, name), root).replace("\\", "/")
+            path = submissions.confined_file(root, rel)
+            migrated = rel
+            if rel.split("/")[0] in aliases and rel.split("/")[0] != kaohao:
+                migrated = kaohao + "/" + rel.split("/", 1)[1]
+                renamed[migrated] = rel
+            if migrated in files:
+                raise ValueError("旧考号目录迁移后源码路径冲突")
+            with open(path, "rb") as source:
+                files[migrated] = source.read()
+    if not files and not roots:
+        raise ValueError("原始交卷源码已丢失；不能把缺失档案判为零分")
+    files = submissions.clean_files(files)
+    # 防止已经被测试夹具/改题污染的旧结果被当作本场真实交卷重算。
+    expected = {store.code_of(p) for p in exam.get("problems", [])}
+    old_files = [str(p.get("file")) for p in entry.get("problems", {}).values() if p.get("file")]
+    if (old_files and expected and not roots
+            and not any(Path(f).stem in expected for f in old_files)
+            and store.entry_total(entry) > 0):
+        raise ValueError("旧成绩源码对应的题目与本场配置不一致，需恢复原交卷或核对题目")
+    picked, missing = wrapper.pick_sources(list(files), exam.get("problems", []), strict=True,
+                    strict_layout=bool(store.rule_of(store.get_contest(cid)).get("freopen")), kaohao=kaohao)
+    return files, picked, missing, renamed
+
+
+def rejudge_contest(cid: str) -> int:
+    """备份后重测；无法重建的提交明确待补资料，不挡住其它学生。"""
+    reserved, jobs = 0, []
+    try:
+        with store._LOCK:
+            contest = store.get_contest(cid)
+            if not contest:
+                raise ValueError("比赛不存在")
+            rule = store.rule_of(contest)
+            exam, results = store.load_exam(cid), store.load_results(cid)
+            targets = [(k, r) for k, r in results.items() if r.get("submitted_at")]
+            if not targets:
+                return 0
+            if any(r.get("judging") or r.get("submission_state") in ("queued", "judging") for _, r in targets):
+                raise ValueError("本场仍有提交正在评测，请完成后重测")
+            for p in exam.get("problems", []):
+                judgelocal.limits_of(str(p.get("pid") or ""))
+                cases = judgelocal.cases_of(str(p.get("pid") or ""))
+                if not cases or any(c.get("out") is None for c in cases):
+                    raise ValueError("题目 " + str(p.get("pid")) + " 的测试数据或标准答案不完整")
+            prepared, issues = [], {}
+            for kaohao, entry in targets:
+                try:
+                    files, picked, missing, renamed = _rejudge_sources(cid, kaohao, entry, exam)
+                    prepared.append((kaohao, files, picked, missing, renamed))
+                except (ValueError, OSError) as error:
+                    issues[kaohao] = str(error)
+            for _ in prepared:
+                if not reserve_submission():
+                    raise ValueError("评测队列空间不足，请稍后重测")
+                reserved += 1
+            backup = os.path.join(store.DATA_DIR, "contests", cid, "rejudge", uuid.uuid4().hex)
+            store._save(os.path.join(backup, "results.json"), results)
+            store._save(os.path.join(backup, "exam.json"), exam)
+            snapshots = []
+            for kaohao, files, picked, missing, renamed in prepared:
+                sid, snapshot = submissions.archive(cid, kaohao, files)
+                picked = {n: f"{snapshot}/{rel}" for n, rel in picked.items()}
+                snapshots.append((kaohao, sid, picked, missing, renamed))
+            exam["released"] = False
+            store.save_exam(cid, exam)
+            store.update_contest(cid, released=False)
+            keys = {store.problem_dir_name(int(p["no"])) for p in exam.get("problems", [])}
+            for kaohao, entry in targets:
+                entry.update(rejudge=True, rejudge_backup=backup)
+                if kaohao in issues:
+                    entry.update(judging=False, submission_state="error", rejudge_error=issues[kaohao])
+                    store.put_result(cid, kaohao, entry)
+            for kaohao, sid, picked, missing, renamed in snapshots:
+                entry = results[kaohao]
+                entry.pop("rejudge_error", None)
+                entry.pop("rejudge_proof", None)
+                entry.update(submission_id=sid, picked={str(k): v for k, v in picked.items()},
+                             missing_sources=missing, judging=True, submission_state="queued",
+                             submission_exam=copy.deepcopy(exam), judge_rule=dict(rule),
+                             rejudge_renamed_paths=renamed, rejudge_best_unverified=bool(rule.get("best_of")),
+                             problems={k: v for k, v in entry.get("problems", {}).items() if k in keys})
+                store.put_result(cid, kaohao, entry)
+                jobs.append((kaohao, sid, picked))
+        for kaohao, sid, picked in jobs:
+            reserved -= 1
+            enqueue_submission(cid, kaohao, picked, exam, sid, reserved=True)
+        return len(jobs)
+    finally:
+        for _ in range(reserved):
+            release_submission()
 
 # ------------------------------------------------------------------ 逐点明细
 
@@ -114,7 +299,7 @@ def _norm_case(raw: dict, idx: int) -> dict:
     case = {
         "no": _case_no(raw, idx),
         "status": status,
-        "status_text": hydro.status_text(status),
+        "status_text": verdict.status_text(status),
         "time": _int_or_none(raw.get("time")),
         "memory": _int_or_none(raw.get("memory")),
         "score": _int_or_none(raw.get("score")) or 0,
@@ -195,9 +380,6 @@ def _pack_cases(cid: str, kaohao: str, code: str, raw_cases, full: int) -> list:
     for raw in _as_case_list(raw_cases):
         if isinstance(raw, dict):
             cases.append(_norm_case(raw, len(cases)))
-    if len(cases) > _MAX_CASES:
-        log(f"[判分] {cid}/{kaohao} {code} 有 {len(cases)} 条逐点记录，只落前 {_MAX_CASES} 条")
-        cases = cases[:_MAX_CASES]
     if not cases:
         return []
     if not full:
@@ -205,7 +387,7 @@ def _pack_cases(cid: str, kaohao: str, code: str, raw_cases, full: int) -> list:
         full = 100
         log(f"[判分] {cid}/{kaohao} {code} 没记满分，逐点计分按 100 分算")
     for case, point in zip(cases, _point_scores(full, len(cases))):
-        case["score"] = point if case["status"] == hydro.STATUS_AC else 0
+        case["score"] = point if case["status"] == verdict.STATUS_AC else 0
     for case in cases:
         if not any(len(case[k]) > _CASE_LIMIT for k in ("input", "output", "answer")):
             continue
@@ -252,7 +434,7 @@ def _problem_meta(cid: str, prob_no: int, code: str = "", full: int = 0) -> tupl
     return code or store.problem_dir_name(prob_no), int(full or 0)
 
 
-def _clear_judging(cid: str, kaohao: str) -> None:
+def _clear_judging(cid: str, kaohao: str, submission_id: str = "", *, error: bool = False) -> None:
     """异常路径专用：清掉「判题中」标志，别让提交永远卡在判题中。
 
     这里自己也可能失败（比赛刚被删、磁盘满），那就只落日志——它本身就是兜底，
@@ -263,18 +445,37 @@ def _clear_judging(cid: str, kaohao: str) -> None:
         # 变成一个「不在索引里、界面上看不到」的孤儿目录（_apply_result 已有同样的保护）。
         if not store.get_contest(cid):
             return
-        entry = store.load_results(cid).get(kaohao, {})
-        entry.setdefault("problems", {})
-        entry["judging"] = False
-        entry["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        store.put_result(cid, kaohao, entry)
+        with store._LOCK:
+            entry = store.load_results(cid).get(kaohao, {})
+            if submission_id and entry.get("submission_id") != submission_id:
+                return
+            entry.setdefault("problems", {})
+            if not error and entry.get("rejudge_best_unverified"):
+                exam = entry.get("submission_exam") or store.load_exam(cid)
+                maximum = all((entry["problems"].get(store.problem_dir_name(int(p["no"]))) or {}).get("status") == 1
+                              and (entry["problems"].get(store.problem_dir_name(int(p["no"]))) or {}).get("score") == int(p.get("full") or 0)
+                              for p in exam.get("problems", []))
+                if not maximum or not exam.get("problems"):
+                    error = True
+                    entry["rejudge_error"] = "IOI 留存计分源码重测未达到全部题目满分，缺完整历史，无法证明历史最高分"
+                else:
+                    entry["rejudge_proof"] = {"method": "retained_sources_attain_full_score_upper_bound"}
+                    entry.pop("rejudge_error", None)
+                entry.pop("rejudge_best_unverified", None)
+            if entry.get("rejudge_error"):
+                error = True
+            entry["judging"] = False
+            entry["submission_state"] = "error" if error else "done"
+            if not error:
+                entry["evaluation_completed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            store.put_result(cid, kaohao, entry)
     except Exception as e:
         log(f"[判分] {cid}/{kaohao} 清 judging 标志失败：{e!r}")
 
 
 def _apply_result(cid: str, kaohao: str, prob_no: int, row: dict, *, best_of: bool,
                   note: str = "", hint: str = "", file_rel: str = "",
-                  full: int = 0, code: str = "") -> dict:
+                  full: int = 0, code: str = "", submission_id: str = "") -> dict:
     """把一次评测结果写进成绩表（按赛制决定覆盖还是取最高分）。
 
     计分按测试点：每点分值 = 满分 / 测试点数，总分 = 通过点的分值之和（不再按子任务
@@ -288,7 +489,7 @@ def _apply_result(cid: str, kaohao: str, prob_no: int, row: dict, *, best_of: bo
     无论本次成绩好坏，都会落盘（提交次数、最近一次结果），
     否则 IOI 保留最高分的分支会让成绩表一直卡在"判题中"。
     """
-    with JUDGE_SLOTS:
+    with store._LOCK:
         # 判分是异步的：老师有可能在判分过程中把这场比赛删了。此时如果照旧写回成绩，
         # `data/contests/<cid>/` 会被重新创建出来，变成一个"没有索引的孤儿目录"
         # （重启后永远没人看得到它，却会让验收脚本误报"有提交卡在判分中"）。
@@ -298,9 +499,10 @@ def _apply_result(cid: str, kaohao: str, prob_no: int, row: dict, *, best_of: bo
                     "attempt_status_text": "比赛已删除", "attempt_score": 0}
         key = store.problem_dir_name(prob_no)
         entry = store.load_results(cid).get(kaohao, {})
+        if submission_id and entry.get("submission_id") != submission_id:
+            return {"score": 0, "status_text": "旧提交已作废", "stale": True}
         entry.setdefault("problems", {})
-        entry["judging"] = False
-        entry["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        entry["judging"] = bool(submission_id)
 
         old = entry["problems"].get(key) or {}
         status = int(row.get("status", 8))
@@ -316,25 +518,32 @@ def _apply_result(cid: str, kaohao: str, prob_no: int, row: dict, *, best_of: bo
             "score": (sum(int(c.get("score") or 0) for c in cases) if cases
                       else int(row.get("score") or 0)),
             "status": status,
-            "status_text": hydro.status_text(status),
+            "status_text": verdict.status_text(status),
             "record_id": row.get("record_id", ""),
             "time": row.get("time"),
             "memory": row.get("memory"),
             "note": row.get("note", note),
             "hint": hint,
             "file": file_rel,
+            "submission_id": submission_id,
             "testcases": cases,          # 逐点明细（管理端展示用；内容已限长）
             # 提交失败（没拿到评测结果）不算一次提交
-            "tries": int(old.get("tries", 0)) + (0 if failed else 1),
+            "tries": int(old.get("tries", 0)) + (0 if failed or entry.get("rejudge")
+                       or (submission_id and old.get("submission_id") == submission_id) else 1),
         }
         attempt.update(_side_texts(row))    # 编译报错 / 评测机评语原文（有才存）
-        if best_of and old and int(old.get("score", 0)) >= attempt["score"]:
+        for field in ("environment", "official_time_ms", "effective_time_ms", "time_scale", "calibrated", "reference_time"):
+            if field in row:
+                attempt[field] = row[field]
+        if status == 8:
+            item = dict(old) if old else {"score": 0, "status": 8, "status_text": "待重测"}
+            item["pending"] = True
+            item["system_error"] = attempt.get("note") or "评测系统错误，等待重测"
+        elif best_of and old and int(old.get("score", 0)) >= attempt["score"] and not entry.get("rejudge_best_unverified"):
             # IOI 赛制：计分保留最高分（分数相同保留先到的），本次提交只更新提交信息
             item = dict(old)
             item["tries"] = attempt["tries"]
             item.setdefault("file", "")
-            if file_rel:
-                item["file"] = file_rel
             if hint:
                 item["hint"] = hint
             item["improved"] = False
@@ -342,19 +551,21 @@ def _apply_result(cid: str, kaohao: str, prob_no: int, row: dict, *, best_of: bo
             item = dict(attempt)
             item["improved"] = bool(best_of and old
                                     and attempt["score"] > int(old.get("score", 0)))
+        if status != 8:
+            item.pop("pending", None)
+            item.pop("system_error", None)
         if old:
             item["prev_score"] = int(old.get("score", 0))
         item["attempt_status_text"] = attempt["status_text"]
         item["attempt_status"] = attempt["status"]
         item["attempt_score"] = attempt["score"]
         item["attempt_record_id"] = attempt["record_id"]
-        item["attempt_at"] = entry["submitted_at"]
+        item["attempt_at"] = entry.get("submitted_at", "")
         # 评测机返回「系统错误」通常是它自己出问题了（典型：服务器重启后判分机没注册上
         # 判题会话，此后所有提交都是 SE）。这种时候最该让人一眼看出来，而不是当成 0 分。
         if status == 8 and not item.get("hint"):
             item["hint"] = ("评测机返回「系统错误」：多半不是代码问题，而是判分机没在工作"
-                            "（服务器重启后常见）。老师可在服务器执行 "
-                            "cd /root/hydro && docker compose restart oj-judge 后让学生重交。")
+                            "（服务器重启后常见）。请检查 go-judge.service，恢复后重测。")
         if failed:
             item["attempt_note"] = attempt["note"]
         entry["problems"][key] = item
@@ -363,21 +574,9 @@ def _apply_result(cid: str, kaohao: str, prob_no: int, row: dict, *, best_of: bo
         return item
 
 
-def ensure_account(cid: str, kaohao: str) -> dict:
-    """返回本场名册里这个考号的记录（**历史名字保留**）。
-
-    以前这一步要在评测站给学生建账号（判分要拿账号提交给 Hydro）；判题换成
-    go-judge 之后，判分是在本机沙箱里跑的，**不需要任何账号**了。
-    保留函数名与返回形状，调用点不用改；名册里已有的 `uid`/`pw` 字段留着不动
-    （老数据，删了也没意义）。
-    """
-    info = store.load_roster(cid).get(kaohao)
-    if not info:
-        raise hydro.HydroError("考号不在本场名单里")
-    return info
 
 
-def judge_csp(cid: str, kaohao: str, picked: dict, exam: dict) -> None:
+def judge_csp(cid: str, kaohao: str, picked: dict, exam: dict, submission_id: str = "") -> bool:
     """三种赛制共用的判分：交文件夹、逐题判。picked = {题号: 相对路径}。
 
     **判题在本地跑**（`core/judgelocal.py` + go-judge 沙箱），不再提交给 Hydro：
@@ -388,8 +587,7 @@ def judge_csp(cid: str, kaohao: str, picked: dict, exam: dict) -> None:
 
     **赛制差异只在这里分叉**（别再把它们混成一套）：
 
-    * `freopen`（只有 CSP 为真）—— CSP 用 `auto` 口径：程序自己 `freopen` 写的
-      `<英文名>.out` 优先，没写就用标准输出（与旧垫片行为一致，老提交重测不会大变）。
+    * `freopen`（只有 CSP 为真）—— CSP 严格使用 `<英文名>.in/.out` 文件。
       OI/IOI 用 `stdin` 口径：只喂标准输入，沙箱里**不放**输入文件
       （学生按题面写的就是标准输入输出）。
     * `best_of`（只有 IOI 为真）—— IOI 每题取多次提交的最高分，交一份更差的不该覆盖。
@@ -401,59 +599,101 @@ def judge_csp(cid: str, kaohao: str, picked: dict, exam: dict) -> None:
         log(f"[{cid}/{kaohao}] 不在本场名单里，跳过判分")
         return
     # 本场的赛制规则：决定「I/O 口径」和「怎么计分」
-    rule = store.rule_of(store.get_contest(cid) or {})
-    io_mode = "auto" if rule.get("freopen") else "stdin"
+    current_entry = store.load_results(cid).get(kaohao, {})
+    rule = (current_entry.get("judge_rule") if submission_id and current_entry.get("submission_id") == submission_id else None) or store.rule_of(store.get_contest(cid) or {})
+    io_mode = "file" if rule.get("freopen") else "stdin"
     best_of = bool(rule.get("best_of"))
     # 判分是异步的：老师可能在判分过程中把这场比赛删了。照旧写回会把
     # data/contests/<cid>/ 重新建出来，变成一个「不在索引里、界面上看不到」的孤儿目录。
     if not store.get_contest(cid):
         log(f"[判分] 比赛 {cid} 已删除，跳过 {kaohao}")
         return
-    entry = store.load_results(cid).get(kaohao, {})
-    entry.update({
-        "problems": entry.get("problems", {}),
-        "judging": True,
-        "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-    })
-    store.put_result(cid, kaohao, entry)
+    with store._LOCK:
+        entry = store.load_results(cid).get(kaohao, {})
+        if submission_id and entry.get("submission_id") != submission_id:
+            return False
+        from . import judge_profile
+        profile = entry.get("judge_profile") if submission_id and entry.get("profile_submission_id") == submission_id else None
+        limits = entry.get("judge_limits") if submission_id and entry.get("profile_submission_id") == submission_id else None
+        if profile is None:
+            profile = judge_profile.load()
+        if limits is None:
+            limits = {}
+            for prob in exam.get("problems", []):
+                if not (picked or {}).get(int(prob["no"])):
+                    continue
+                pid = str(prob.get("pid") or "")
+                try:
+                    limits[pid] = list(judgelocal.limits_of(pid))
+                except ValueError as error:
+                    limits[pid] = {"error": str(error)}
+        if not best_of:
+            active = {store.problem_dir_name(int(p["no"])) for p in exam.get("problems", [])}
+            entry["problems"] = {k: v for k, v in entry.get("problems", {}).items() if k in active}
+        entry.update({"problems": entry.get("problems", {}), "judging": True,
+                      "submission_state": "judging", "judge_profile": profile,
+                      "profile_submission_id": submission_id, "judge_limits": limits,
+                      "judge_revision": hashlib.sha256(b"".join((Path(__file__).with_name(n)).read_bytes() for n in ("grading.py", "judgelocal.py", "gojudge.py", "wrapper.py"))).hexdigest()})
+        store.put_result(cid, kaohao, entry)
 
     base_dir = store.upload_dir(cid, kaohao)
+    errors = False
     for prob in exam.get("problems", []):
         no = int(prob["no"])
         code, full = store.code_of(prob), int(prob.get("full") or 0)
         rel = (picked or {}).get(no)
         if not rel:
+            if not best_of:
+                _apply_result(cid, kaohao, no, {"status": 2, "score": 0,
+                                               "judgeTexts": ["本次交卷未提交这道题的源码"]},
+                              best_of=False, full=full, code=code, submission_id=submission_id)
             continue
-        src = os.path.join(base_dir, rel)
+        if submission_id and store.load_results(cid).get(kaohao, {}).get("submission_id") != submission_id:
+            return False
         try:
-            with open(src, "r", encoding="utf-8", errors="replace") as f:
+            src = submissions.confined_file(base_dir, rel)
+            with open(src, "rb") as f:
                 source = f.read()
-        except OSError as e:
+        except (OSError, ValueError) as e:
             log(f"[{cid}/{kaohao}] 第{no}题读取源码失败：{e}")
+            _apply_result(cid, kaohao, no, {"status": 8, "score": 0, "note": "源码快照无法读取"},
+                          best_of=best_of, full=full, code=code, submission_id=submission_id)
+            errors = True
             continue
         ext = os.path.splitext(rel)[1]
         # freopen 提示只对 CSP 有意义（OI/IOI 本来就该用标准输入输出）：
         # 现在**不改学生代码**了，这条提示纯粹是给老师看日志用的
-        hint = wrapper.check_freopen(source, code) if rule.get("freopen") else ""
+        hint = wrapper.check_freopen(source.decode("utf-8", "replace"), code) if rule.get("freopen") else ""
         if hint:
             log(f"[{cid}/{kaohao}] {code} {hint}")
         # best_of 每个调用点都要显式传：漏一个就是 TypeError，判分线程静默死掉、
         # 提交永远卡在「判题中」（线上修过一次，别再退回）。
-        if not wrapper.can_wrap(ext):
-            _apply_result(cid, kaohao, no, {"status": 8, "score": 0,
+        if not wrapper.supports_source(ext):
+            _apply_result(cid, kaohao, no, {"status": 7, "score": 0,
                                            "note": f"暂不支持 {ext} 语言，请用 .cpp 提交"},
-                          best_of=best_of, file_rel=rel, code=code, full=full)
+                          best_of=best_of, file_rel=rel, code=code, full=full, submission_id=submission_id)
             continue
         pid = str(prob.get("pid") or "")
-        t_ms, mem_mb = judgelocal.limits_of(pid)
-        row = judgelocal.judge_source(pid, source, ext, code=code, full=full,
-                                      time_ms=t_ms, memory_mb=mem_mb, io_mode=io_mode)
+        try:
+            fixed = limits[pid]
+            if isinstance(fixed, dict):
+                raise ValueError(fixed["error"])
+            t_ms, mem_mb = fixed
+            row = judgelocal.judge_source(pid, source, ext, code=code, full=full,
+                                          time_ms=t_ms, memory_mb=mem_mb, io_mode=io_mode, profile=profile)
+        except ValueError as e:
+            row = {"status": 8, "score": 0, "note": str(e)}
         _apply_result(cid, kaohao, no, row, best_of=best_of, hint=hint, file_rel=rel,
-                      code=code, full=full)
+                      code=code, full=full, submission_id=submission_id)
+        if int(row.get("status") or 0) == 8:
+            errors = True
+            break
+    _clear_judging(cid, kaohao, submission_id, error=errors)
     log(f"[{cid}/{kaohao}] {rule.get('key', '')} 判分完成")
+    return errors
 
 
-def safe_judge_csp(cid: str, kaohao: str, picked: dict, exam: dict) -> None:
+def safe_judge_csp(cid: str, kaohao: str, picked: dict, exam: dict, submission_id: str = "") -> bool:
     """判分线程的兜底入口：任何异常都不能让提交永久卡在"判题中"。
 
     判分跑在守护线程里，异常没人接时线程会静默死掉，judging 标志永远是 True，
@@ -461,49 +701,13 @@ def safe_judge_csp(cid: str, kaohao: str, picked: dict, exam: dict) -> None:
     标志（已写好的判分结果原样保留）。
     """
     try:
-        judge_csp(cid, kaohao, picked, exam)
+        return judge_csp(cid, kaohao, picked, exam, submission_id)
     except Exception as e:
         log(f"[{cid}/{kaohao}] 判分线程异常：{e!r}\n{traceback.format_exc()}")
-        _clear_judging(cid, kaohao)
+        _clear_judging(cid, kaohao, submission_id, error=True)
+        return True
 
 
-def judge_code(cid: str, kaohao: str, prob: dict, source: str, ext: str,
-               lang: str, contest: dict) -> dict:
-    """OI / IOI 赛制：网页提交单文件代码（标准输入输出）。"""
-    info = ensure_account(cid, kaohao)
-    no = int(prob["no"])
-    rule = store.rule_of(contest)
-    entry = store.load_results(cid).get(kaohao, {})
-    entry.setdefault("problems", {})
-    entry["judging"] = True
-    entry["submitted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    store.put_result(cid, kaohao, entry)
-
-    rel = f"{store.code_of(prob)}{ext}"
-    code, full = store.code_of(prob), int(prob.get("full") or 0)
-    try:
-        if not wrapper.can_wrap(ext):
-            raise hydro.HydroError(f"暂不支持 {ext} 语言，请用 .cpp 提交")
-        # 判题在本地跑（go-judge 沙箱），不再往评测站提交
-        row = localoj.judge(prob["pid"], source, ext, code=code, full=full,
-                            io_mode="auto" if rule.get("freopen") else "stdin")
-    except hydro.HydroError as e:
-        # 评测机忙/出错也要落盘，否则成绩表会一直卡在"判题中"
-        _apply_result(cid, kaohao, no, {"status": 8, "score": 0, "note": str(e)},
-                      best_of=rule["best_of"], file_rel=rel, code=code, full=full)
-        raise
-    except Exception as e:
-        # 非评测机错误（代码 bug、数据坏了之类）也得清掉 judging，
-        # 否则这一题的提交永远停在「判题中」
-        log(f"[{cid}/{kaohao}] 第{no}题判分异常：{e!r}\n{traceback.format_exc()}")
-        _clear_judging(cid, kaohao)
-        raise
-    item = _apply_result(cid, kaohao, no, row, best_of=rule["best_of"], file_rel=rel,
-                         code=code, full=full)
-    log(f"[{cid}/{kaohao}] {rule['key']} 第{no}题 本次={item.get('attempt_status_text')} "
-        f"{item.get('attempt_score')}分 计分={item.get('status_text')} {item.get('score')}分 "
-        f"第{item.get('tries')}次")
-    return item
 
 
 def graded_text(got: dict, full: int) -> str:
@@ -515,9 +719,11 @@ def graded_text(got: dict, full: int) -> str:
     """
     if not got:
         return "未提交"
+    if got.get("pending"):
+        return "评测异常，待重测（旧分暂存）"
     score = int(got.get("score") or 0)
     status = int(got.get("status", 0))
-    raw = got.get("status_text") or hydro.status_text(status)
+    raw = got.get("status_text") or verdict.status_text(status)
     if score >= int(full or 100):
         return "答案正确"
     if score > 0:

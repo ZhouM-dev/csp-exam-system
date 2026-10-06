@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""题单批量导入接口 —— 把一份「出题工程」整包导入到评测站（Hydro）。
+"""题单批量导入接口 —— 把一份「出题工程」整包导入到本地题库。
 
 输入：一个 zip 或目录，结构遵循出题工程规范（详见 题目单导入接口.md）：
     <题目库>/
@@ -22,13 +22,13 @@
 分配与合法性校验都走 `problems.assign_number`，和自己建题同一套逻辑。
 
 命令行：
-    python3 import_problemset.py <zip|目录> [选项]
-    python3 import_problemset.py 题单.zip --tag 寒假作业 --dry-run
-    python3 import_problemset.py 题单.zip --only G01,D01 --json 报告.json
-    python3 import_problemset.py 题单.zip --code G01=candy --code DP01=t1
+    python3 -m csp_exam.core.importer <zip|目录> [选项]
+    python3 -m csp_exam.core.importer 题单.zip --tag 寒假作业 --dry-run
+    python3 -m csp_exam.core.importer 题单.zip --only G01,D01 --json 报告.json
+    python3 -m csp_exam.core.importer 题单.zip --code G01=candy --code DP01=t1
 
 代码调用：
-    from import_problemset import import_problemset
+    from csp_exam.core.importer import import_problemset
     report = import_problemset("题单.zip", tags=["寒假作业"], codes={"G01": "candy"})
 """
 
@@ -40,20 +40,12 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
 import zipfile
 
 # ---------------------------------------------------------------- 常量与规则
-
-from ..config import HYDRO_COMPOSE_FILE, HYDRO_DIR
-
-COMPOSE_DIR = HYDRO_DIR
-COMPOSE = ["docker", "compose", "-f", HYDRO_COMPOSE_FILE]
-HOST_IMPORT_DIR = "/root/hydro/data/backend/import"     # 宿主机上的导入目录
-CONTAINER_IMPORT_DIR = "/root/.hydro/import"            # 容器内看到的同一目录
 
 DEFAULT_TIME_MS = 1000
 DEFAULT_MEMORY_MB = 256
@@ -115,10 +107,26 @@ class Bundle:
         self._zf: zipfile.ZipFile | None = None
         self.root = source
         self._names: list[str] = []
+        self._members = {}
 
         if self.is_zip:
             self._zf = zipfile.ZipFile(source)
-            self._names = [n.replace("\\", "/") for n in self._zf.namelist() if not n.endswith("/")]
+            try:
+                total = 0
+                for member in self._zf.infolist():
+                    if member.is_dir(): continue
+                    name = member.filename.replace("\\", "/")
+                    if name.startswith("/") or ":" in name or ".." in name.split("/") or "\x00" in name:
+                        raise ValueError("题单 zip 包含越界文件名")
+                    if name in self._members: raise ValueError("题单 zip 包含重复文件名")
+                    self._members[name] = member
+                    total += member.file_size
+                    if len(self._members) > 20000 or total > 512 * 1024 * 1024:
+                        raise ValueError("题单解压后超过 512MB 或 20000 个文件")
+                self._names = list(self._members)
+            except Exception:
+                self._zf.close()
+                raise
         elif os.path.isdir(source):
             for base, _dirs, files in os.walk(source):
                 for f in files:
@@ -132,7 +140,7 @@ class Bundle:
 
     def read(self, name: str) -> bytes:
         if self._zf:
-            return self._zf.read(name)
+            return self._zf.read(self._members[name])
         with open(os.path.join(self.root, name.replace("/", os.sep)), "rb") as f:
             return f.read()
 
@@ -140,7 +148,7 @@ class Bundle:
         """流式拷贝（大文件不进内存）。"""
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
         if self._zf:
-            with self._zf.open(name) as src, open(dst_path, "wb") as out:
+            with self._zf.open(self._members[name]) as src, open(dst_path, "wb") as out:
                 shutil.copyfileobj(src, out, 1024 * 256)
         else:
             shutil.copyfile(os.path.join(self.root, name.replace("/", os.sep)), dst_path)
@@ -309,172 +317,6 @@ def _decode(raw: bytes) -> str:
 
 # ---------------------------------------------------------------- 生成题目包
 
-PROBLEM_YAML = """title: {title}
-pid: {pid}
-tag:
-{tags}
-difficulty: {difficulty}
-config: |-
-  time: {time}
-  memory: {memory}
-"""
-
-
-def write_package(bundle: Bundle, prob: dict, dest_root: str,
-                  time_ms: int, memory_mb: int, extra_tags: list[str]) -> str:
-    """把一道题写成 Hydro 题目包，返回包目录。"""
-    root = os.path.join(dest_root, prob["pid"])
-    shutil.rmtree(root, ignore_errors=True)
-    os.makedirs(os.path.join(root, "testdata"), exist_ok=True)
-    os.makedirs(os.path.join(root, "std"), exist_ok=True)
-
-    tags = list(dict.fromkeys([*extra_tags, *prob["topics"]])) or ["题单导入"]
-    if prob["difficulty_label"]:
-        tags.append(f"难度:{prob['difficulty_label']}")
-    with open(os.path.join(root, "problem.yaml"), "w", encoding="utf-8") as f:
-        f.write(PROBLEM_YAML.format(
-            title=prob["title"], pid=prob["pid"], difficulty=prob["difficulty"],
-            tags="\n".join(f"  - {t}" for t in tags),
-            time=time_ms, memory=memory_mb,
-        ))
-    # 时限/内存的权威位置是 testdata/config.yaml（Hydro 导入器按这个文件名读取）；
-    # 只写在 problem.yaml 的 config 字段里不会生效（实测踩过）。
-    with open(os.path.join(root, "testdata", "config.yaml"), "w", encoding="utf-8") as f:
-        f.write(f"time: {time_ms}\nmemory: {memory_mb}\n")
-
-    statement = prob["statement"] or f"# {prob['title']}\n\n（本题单未附题面）\n"
-    with open(os.path.join(root, "problem_zh.md"), "w", encoding="utf-8") as f:
-        f.write(statement)
-
-    # 测试点重排成 1.in/1.out、2.in/2.out……（原编号是两位补零，这里只保留顺序）
-    for i, (_num, in_rel, out_rel) in enumerate(prob["cases"], 1):
-        bundle.stream_to(in_rel, os.path.join(root, "testdata", f"{i}.in"))
-        bundle.stream_to(out_rel, os.path.join(root, "testdata", f"{i}.out"))
-
-    if prob["std"]:
-        with open(os.path.join(root, "std", "solution.cpp"), "w", encoding="utf-8") as f:
-            f.write(_decode(bundle.read(prob["std"])))
-    return root
-
-
-# ---------------------------------------------------------------- 导入 Hydro
-
-
-def _container_path(host_path: str) -> str:
-    """宿主机导入目录 -> 容器内路径（这个映射踩过坑，务必保持。"""
-    if host_path.startswith(HOST_IMPORT_DIR):
-        return CONTAINER_IMPORT_DIR + host_path[len(HOST_IMPORT_DIR):]
-    return host_path
-
-
-def hydro_problem_pids() -> set[str]:
-    """站点上已有的题目标识（用于幂等判断）。"""
-    js = 'print(db.document.find({docType:10},{pid:1}).toArray().map(d=>d.pid||"").join("\\n"))'
-    try:
-        p = subprocess.run(COMPOSE + ["exec", "-T", "oj-mongo", "mongosh", "hydro", "--quiet", "--eval", js],
-                           cwd=COMPOSE_DIR, capture_output=True, text=True, timeout=60,
-                           encoding="utf-8", errors="replace")
-    except (subprocess.TimeoutExpired, OSError):
-        return set()
-    return {line.strip() for line in (p.stdout or "").splitlines() if line.strip()}
-
-
-def _problem_doc_id(pid: str) -> str | None:
-    """这道题在评测站里的 docId：`""` = 站点上没有这道题，`None` = 查不动（容器没起来/超时）。
-
-    区分这两种"没有"很重要：查不动时不能当成"已经删干净了"。
-    """
-    js = (f'const d=db.document.findOne({{docType:10,pid:"{pid}"}},{{docId:1}}); '
-          f'print(d ? d.docId : "")')
-    try:
-        p = subprocess.run(COMPOSE + ["exec", "-T", "oj-mongo", "mongosh", "hydro", "--quiet", "--eval", js],
-                           cwd=COMPOSE_DIR, capture_output=True, text=True, timeout=60,
-                           encoding="utf-8", errors="replace")
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-    lines = [x.strip() for x in (p.stdout or "").splitlines() if x.strip()]
-    # 查不到时 mongosh 只打印一个空行（踩过：旧写法 .splitlines()[-1] 直接 IndexError）
-    return lines[-1] if lines else ""
-
-
-def hydro_delete_problem(pid: str) -> bool:
-    """按 pid 删除题目（覆盖重建 / 彻底删除都用它）。返回 True = **确认删掉了**。
-
-    **命令跑完不等于题没了**：以前不看子进程结果、也不复查，删失败照样返回 True，
-    管理端就跟老师说"已彻底删除"，回头在站点上还看得见（踩过）。现在删完**再查一次**，
-    查不到才算成功；查不动（容器没起来）算失败——宁可说没删掉，也不能报假成功。
-
-    题**本来就不存在**（或评测站没起来）时返回 False，不抛异常——
-    调用方经常是"先删掉旧的再导入"，题目不存在是正常情况。
-    （踩过：mongosh 什么都没查到时会打印一个空行，旧写法 `.splitlines()[-1]`
-    直接 IndexError，把验收脚本的准备阶段和整个导入流程带崩。）
-    """
-    doc_id = _problem_doc_id(pid)
-    if not doc_id:
-        return False
-    try:
-        subprocess.run(COMPOSE + ["exec", "-T", "oj-backend", "hydrooj", "cli", "problem", "del", "system", doc_id],
-                       cwd=COMPOSE_DIR, capture_output=True, text=True, timeout=120,
-                       encoding="utf-8", errors="replace")
-    except (subprocess.TimeoutExpired, OSError):
-        return False
-    return _problem_doc_id(pid) == ""       # 复查：真的查不到了才算删掉
-
-
-def hydro_import(pid: str, container_dir: str, timeout: int = 300,
-                 before: set | None = None) -> tuple[bool, str]:
-    """调用站点自带的导入命令。**返回 True = 确认站点上出现了这个标识的题目。**
-
-    **导入命令说成功不等于题真的按这个标识建出来了**：评测站的 pid 只认
-    `^(?:[a-z0-9]{1,10}-)?[a-z][0-9a-z]*$`（带短横的前半截还得是注册过的命名空间），
-    标识不合规时它**不报错**，而是自己起个 `#<docId>` —— 输出里照样有
-    `Imported problem #63`，调用方以为成功，老师却在题库里找不到这道题，
-    站点上还多出一道没有标识的僵尸题（踩过）。
-
-    所以导完**复查一次**：站点上查不到这个标识就算失败，并把评测站自动建的那道清掉。
-
-    `before` —— 导入**之前**站点上有哪些标识（调用方手上通常已经有了，如
-    `create_problem` 的 `on_site`；传进来才能在出错时认出"这次新多出来的那道"）。
-    不传也能用，只是出错时没法清理，只能如实报错。
-    """
-    cmd = COMPOSE + ["exec", "-T", "oj-backend", "hydrooj", "cli",
-                     "problem", "import", "system", f"{container_dir}/{pid}"]
-    try:
-        p = subprocess.run(cmd, cwd=COMPOSE_DIR, capture_output=True, text=True,
-                           timeout=timeout, encoding="utf-8", errors="replace")
-    except subprocess.TimeoutExpired:
-        return False, "导入超时"
-    except OSError as e:
-        return False, f"无法执行导入命令：{e}"
-    blob = (p.stdout or "") + (p.stderr or "")
-    says_ok = bool(re.search(r"Imported problem\s+\S+", blob))
-    if not says_ok and re.search(r"\bError\b|ENOENT|Exception", blob):
-        return False, blob.strip()[-300:]
-    if not says_ok and p.returncode != 0:
-        return False, blob.strip()[-200:]
-
-    # ---- 复查：站点上真的出现了这个标识吗
-    if _problem_doc_id(pid):
-        return True, ""
-    # 没出现：多半是标识不合评测站的规矩，它自己起了个 #N。把这次多出来的那道清掉。
-    junk = ""
-    if before is not None:
-        after = hydro_problem_pids()
-        new = sorted(after - set(before)) if after else []
-        if new and all(x.startswith("#") for x in new):
-            junk = "、".join(new)
-            for x in new:
-                hydro_delete_problem(x)
-    return False, (
-        f"评测站没有按标识 {pid} 建题（它的标识只收字母开头的字母数字，"
-        f"带短横/下划线/数字开头的都会被它悄悄换成自动编号）"
-        + (f"；已清掉它自动建的 {junk}" if junk else "")
-        + "。请把题目文件夹里的标识改成字母开头的样子（如 G01、candy2）再建。")
-
-
-# ---------------------------------------------------------------- 主接口
-
-
 def import_problemset(source: str, *, tags: list[str] | None = None,
                       time_ms: int = DEFAULT_TIME_MS, memory_mb: int = DEFAULT_MEMORY_MB,
                       only: list[str] | None = None, overwrite: bool = False,
@@ -491,6 +333,7 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
 
     返回报告：{"total": N, "imported": [...], "skipped": [...], "failed": [...], "problems": [...]}
     """
+    from .store import valid_name
     from . import problems as _mk          # 延迟导入：编号分配/校验的唯一实现在那边
     extra_tags = list(tags or []) or ["题单导入"]
     started = time.time()
@@ -521,18 +364,7 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
             return report
         log(f"识别到 {len(dirs)} 道题" + (f"（索引里 {len(index_info)} 条元数据）" if index_info else ""))
 
-        existing = set() if dry_run else hydro_problem_pids()
-        # 「假删除」的题在系统里**不再算占用**：老师把它删了又重新导这份题单，
-        # 应该把题导进去，而不是回一句"站点上已有同标识的题目"就不管了。
-        # 处理办法：先把旧的那份清掉，再用同一个标识导入（标识保持不变，
-        # 编号登记/题面缓存都对得上）。想"保留旧的、另建一份"走管理端「新建题目」，
-        # 那条路会自动换内部标识。
-        stale = {p for p in existing if _mk.is_deleted(p)}
-        if stale:
-            log(f"  其中 {len(stale)} 道是老师已删除的：{'、'.join(sorted(stale))}（会重建）")
-        if not dry_run:
-            os.makedirs(HOST_IMPORT_DIR, exist_ok=True)
-
+        existing = _mk.localoj.problem_pids()
         for prefix, pid, title in dirs:
             prob = parse_problem(bundle, prefix, pid, title, index_info)
             entry = {
@@ -559,76 +391,48 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
                 continue
 
             if pid in existing and not overwrite:
-                if pid in stale:
-                    # 老师已经把它假删除了（系统里不再认这道题）→ 清掉旧的再导入
-                    log(f"  [重建] {pid} {title}：站点上这份已被删除，先清掉旧的再导入")
-                    hydro_delete_problem(pid)
-                    existing.discard(pid)
-                    stale.discard(pid)
-                else:
-                    entry["status"] = "skipped"
-                    entry["message"] = ("站点上已有同标识的题目（加 --overwrite 可覆盖；"
-                                        "想两份都留着，用管理端「新建题目」建，会自动换内部标识）")
-                    report["skipped"].append(pid)
-                    report["problems"].append(entry)
-                    log(f"  [已存在] {pid} {title}")
-                    continue
-
+                entry.update(status="skipped", message="题库已有同标识的题目；覆盖请启用 overwrite。")
+                report["skipped"].append(pid)
+                report["problems"].append(entry)
+                continue
             # ---- 题目编号：一律由系统分配（T00001，落盘到题库）；
             #      这里能指定的只有**默认英文名**（学生侧），留空则加进比赛时再填
             want = (want_codes.get(pid.upper())
                     or want_codes.get(os.path.basename(prefix).upper()) or "")
             if not want and len(dirs) == 1:
                 want = single_code
-            try:
-                prob["code"] = _mk.assign_number(pid, title=title, name=want)
-            except _mk.CodeError as e:
-                entry["status"] = "failed"
-                entry["message"] = str(e)
-                report["failed"].append(pid)
-                report["problems"].append(entry)
-                log(f"  [英文名不可用] {pid} {title}：{entry['message']}")
-                continue
-            prob["number"] = prob["code"]
-            prob["name"] = _mk.name_of_pid(pid)
-            entry["number"] = prob["number"]
-            entry["name"] = prob["name"]
-            entry["code"] = prob["number"]          # 兼容旧字段名
-            report["codes"][pid] = prob["number"]
-            report["names"][pid] = prob["name"]
-
-            pkg = write_package(bundle, prob, tmpdir, time_ms, memory_mb, extra_tags)
-            entry["package"] = pkg
             if dry_run:
-                entry["status"] = "package-only"
-                entry["message"] = "仅生成题目包（dry-run，未导入站点）"
-                report["prepared"].append(pid)
+                if want and not valid_name(want):
+                    entry.update(status="failed", message=_mk.CODE_HINT)
+                    report["failed"].append(pid)
+                else:
+                    entry.update(status="validated", message="校验通过，未写入题库")
+                    report["prepared"].append(pid)
                 report["problems"].append(entry)
-                log(f"  [试运行] {pid} {title}：编号 {prob['code']}，"
-                    f"{len(prob['cases'])} 个测试点 -> {pkg}")
                 continue
-
-            # ---- 复制到站点的导入目录并调用导入命令
-            target = os.path.join(HOST_IMPORT_DIR, pid)
-            shutil.rmtree(target, ignore_errors=True)
-            shutil.copytree(pkg, target)
-            if overwrite and pid in existing:
-                hydro_delete_problem(pid)
-            # before=existing：导入前站点上有哪些标识（出错时用它认出"新多出来的那道"）
-            ok, msg = hydro_import(pid, CONTAINER_IMPORT_DIR, before=existing)
-            entry["status"] = "imported" if ok else "failed"
-            entry["message"] = msg
-            (report["imported"] if ok else report["failed"]).append(pid)
+            uploads = {n: bundle.read(n) for n in bundle.names() if n.startswith(prefix + "/")}
+            got = _mk.create_problem(pid, title, uploads, time_ms=time_ms, memory_mb=memory_mb,
+                                     statement=prob["statement"], std_source=_decode(bundle.read(prob["std"])),
+                                     overwrite=overwrite, name=want, tags=extra_tags + prob["topics"])
+            ok = bool(got.get("ok"))
+            entry.update(status="imported" if ok else "failed", message=got.get("error", ""),
+                         number=got.get("number", ""), code=got.get("number", ""),
+                         name=got.get("name", ""), pid=got.get("pid", pid))
+            (report["imported"] if ok else report["failed"]).append(entry["pid"])
             report["problems"].append(entry)
-            log(f"  [{'成功' if ok else '失败'}] {pid} {title}：{len(prob['cases'])} 个测试点"
-                + (f"  {msg}" if msg else ""))
+            if ok:
+                existing.add(entry["pid"])
+                report["codes"][entry["pid"]] = entry["number"]
+                report["names"][entry["pid"]] = entry["name"]
+            log(f"  [{'成功' if ok else '失败'}] {pid} {title}：{entry['message']}")
     finally:
         bundle.close()
-        if not keep_workdir and not dry_run and workdir is None:
+        if not keep_workdir and workdir is None:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     report["elapsed_s"] = round(time.time() - started, 1)
-    report["ok"] = not report["failed"]
+    report["ok"] = bool(report["total"]) and not report["failed"]
+    if not report["total"]: report["error"] = "没有识别出任何题目目录"
     return report
 
 
@@ -660,10 +464,10 @@ def main(argv: list[str] | None = None) -> int:
         description="题单批量导入接口：把出题工程（zip 或目录）整包导入评测站",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""示例：
-  python3 import_problemset.py 题单.zip
-  python3 import_problemset.py 题单.zip --tag 寒假作业 --time 2000 --memory 512
-  python3 import_problemset.py ./题目库 --only G01,D01 --dry-run
-  python3 import_problemset.py 题单.zip --code G01=candy --json /root/import-report.json
+  python3 -m csp_exam.core.importer 题单.zip
+  python3 -m csp_exam.core.importer 题单.zip --tag 寒假作业 --time 2000 --memory 512
+  python3 -m csp_exam.core.importer ./题目库 --only G01,D01 --dry-run
+  python3 -m csp_exam.core.importer 题单.zip --code G01=candy --json /root/import-report.json
 """)
     ap.add_argument("source", help="题单 zip 或目录")
     ap.add_argument("--tag", action="append", default=[], help="额外打上的标签，可重复")

@@ -12,9 +12,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))   # -> src/
-import csp_exam.compat  # noqa: F401  （登记平铺模块名，兼容老写法）
-from csp_exam.core import hydro_client, importer, problems, store, wrapper  # noqa: E402
-import wrapper  # noqa: E402
+from csp_exam.core import importer, problems, store, wrapper  # noqa: E402
+from csp_exam.core import wrapper  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -100,9 +99,7 @@ def main() -> int:
 
     print()
     print("=== 9. wrapper 自身（包装与 freopen 提示）没被改坏 ===")
-    w = wrapper.wrap("int main(){}", "candy")
-    ok("candy.in" in w and "candy.out" in w and "int main(){}" in w, "包装包含题名文件与原始代码")
-    ok(wrapper.can_wrap(".cpp") and not wrapper.can_wrap(".py"), "只包装 C/C++")
+    ok(wrapper.supports_source(".cpp") and not wrapper.supports_source(".py"), "只支持 C/C++ 编译")
     ok("未检测到 freopen" in wrapper.check_freopen("int main(){}", "candy"), "忘写 freopen 会提示")
     ok(wrapper.check_freopen('freopen("candy.in","r",stdin);', "candy") == "", "写对了就不提示")
 

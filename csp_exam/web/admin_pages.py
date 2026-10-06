@@ -31,13 +31,13 @@ import time
 import urllib.parse
 import html
 
-from ..core import hydro_client as hydro, judgelocal, localoj, problems as make_problem, store
+from ..core import judge_result as verdict, judgelocal, localoj, problems as make_problem, store
 from ..core import importer as import_problemset
-from ..core import wrapper
+from ..core import wrapper, submissions
 from ..core.grading import graded_cell, graded_text
 from ..core.util import log, _fmt_bytes, _fmt_ms, _fmt_kb
 from ..config import (HERE, MAX_PS_UPLOAD, PORT, PS_JOBS, PS_JOBS_LOCK,
-                      HYDRO_ADMIN_PW_FILE)
+                      )
 from .urls import admin_url, cid_query, problem_detail_url, statement_url
 from .ui import (page, rule_badge, render_upload_tree_html, md_to_html,
                  level_badge, modal, code_pre)
@@ -83,39 +83,7 @@ def _problem_info_path() -> str:
     return make_problem.info_path()
 
 
-def remember_problem(pid: str, *, title: str = "", code: str = "", name: str = "", cases=None,
-                     time_ms=None, memory_mb=None, std: str = "") -> None:
-    """建题成功后记下这道题的元信息（空值不覆盖已有的）。
-
-    code —— 题目编号（T00001）；name —— 建题时填的默认英文名（可空）。
-    """
-    pid = str(pid or "").strip()
-    if not pid:
-        return
-    with store._LOCK:
-        items = load_problem_info()
-        rec = dict(items.get(pid) or {})
-        if title:
-            rec["title"] = str(title)
-        if code:
-            rec["code"] = str(code)
-        if name:
-            rec["name"] = str(name)
-        if cases:
-            rec["cases"] = int(cases)
-        if time_ms:
-            rec["time_ms"] = int(time_ms)
-        if memory_mb:
-            rec["memory_mb"] = int(memory_mb)
-        if std:
-            rec["std"] = str(std)
-        rec["at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        items[pid] = rec
-        if len(items) > PROBLEM_INFO_MAX:      # 只留最近的若干道
-            order = sorted(items, key=lambda k: str((items[k] or {}).get("at", "")))
-            for stale in order[:len(items) - PROBLEM_INFO_MAX]:
-                items.pop(stale, None)
-        save_problem_info(items)
+remember_problem = make_problem.remember_problem
 
 
 def remember_meta(pid: str, *, title: str = "", name: str = "", time_ms=None,
@@ -151,6 +119,9 @@ def remember_meta(pid: str, *, title: str = "", name: str = "", time_ms=None,
     title = str(title or "").strip()
     name = str(name or "").strip()
 
+    if name and not store.valid_name(name):
+        out["error"] = make_problem.CODE_HINT
+        return out
     def _int(v):
         try:
             return int(str(v).strip() or 0)
@@ -196,7 +167,7 @@ def remember_meta(pid: str, *, title: str = "", name: str = "", time_ms=None,
     # 题库清单是**缓存**（列表页先读它）：不刷新的话，改了题目名要等下一次刷新才看得见
     try:
         store.save_catalog(localoj.list_problems())
-    except (hydro.HydroError, OSError) as e:                    # noqa: BLE001
+    except OSError as e:                    # noqa: BLE001
         log(f"[管理端] 改题目名后刷新题库缓存失败：{e!r}")
     out["ok"] = True
     out["changed"] = changed
@@ -214,7 +185,7 @@ def remember_meta(pid: str, *, title: str = "", name: str = "", time_ms=None,
 
 #: 判定 →（状态条上的符号, CSS 类）
 _TP_MARKS = {
-    hydro.STATUS_AC: ("✓", "tp-ok"),
+    verdict.STATUS_AC: ("✓", "tp-ok"),
     2: ("✗", "tp-wa"),        # 答案错误
     3: ("T", "tp-tle"),       # 运行超时
     4: ("M", "tp-mle"),       # 内存超限
@@ -240,13 +211,13 @@ def _tp_mark(status) -> tuple[str, str]:
         st = 0
     if st in _TP_MARKS:
         return _TP_MARKS[st]
-    if st in hydro.STATUS_PENDING:
+    if st in verdict.STATUS_PENDING:
         return ("…", "tp-na")
     return ("✗", "tp-re")
 
 
 def _tp_ok(case: dict) -> bool:
-    return int((case or {}).get("status") or 0) == hydro.STATUS_AC
+    return int((case or {}).get("status") or 0) == verdict.STATUS_AC
 
 
 def _tp_strip(cases: list) -> str:
@@ -302,7 +273,7 @@ def _tp_table(cases: list, pno) -> str:
             label = f"数据分组 {html.escape(sub)}" if sub else "未分组"
             rows.append(f'<tr class="tp-group"><td colspan="6"><b>{label}</b>'
                         f'<span class="tp-sub-score">{ok_n}/{cnt} 通过 · {got} 分</span></td></tr>')
-        status = case.get("status_text") or hydro.status_text(case.get("status"))
+        status = case.get("status_text") or verdict.status_text(case.get("status"))
         cls = "ok" if _tp_ok(case) else "err"
         score = int(case.get("score") or 0)
         note = case.get("message") or ""
@@ -331,7 +302,7 @@ def _case_verdict(case: dict, full: int) -> str:
     过不了的点说清差在哪，过了的点直接说一致。
     """
     status = int(case.get("status") or 0)
-    st_text = case.get("status_text") or hydro.status_text(status)
+    st_text = case.get("status_text") or verdict.status_text(status)
     out = str(case.get("output") or "")
     ans = str(case.get("answer") or "")
     score = int(case.get("score") or 0)
@@ -351,8 +322,7 @@ def _case_verdict(case: dict, full: int) -> str:
     if _tp_ok(case):
         if not ans.strip():
             return ('<div class="flash flash-ok" style="margin:12px 0 0">'
-                    '<b>这一点通过了。</b>不过这一点的标准答案是空的（题目只给了输入、没给 .out），'
-                    '只说明程序正常跑完了。' + note + "</div>")
+                    '<b>这一点通过了。</b>标准答案为空输出。' + note + '</div>')
         return ('<div class="flash flash-ok" style="margin:12px 0 0">'
                 '<b>学生输出与标准答案一致</b>，这一点拿到 '
                 f'{score} 分。' + note + "</div>")
@@ -688,11 +658,12 @@ PROBLEMS_JS = """<script>
     var body = new URLSearchParams();
     body.set('pid', cur);
     body.set('source', $('test-src').value);
+    body.set('io_mode', $('test-io').value);
     fetch('/admin/selftest' + (window.CSP_KEY_QUERY || ''), { method: 'POST', body: body })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (!d.ok) {
-          hint.innerHTML = '　<span class="err">' + (d.error || '测试失败') + '</span>';
+          hint.textContent = d.error || '测试失败';
           return;
         }
         hint.textContent = '　跑完了：' + d.passed + '/' + d.total + ' 个点通过';
@@ -801,6 +772,7 @@ def _test_modal() -> str:
 <p class="muted" style="margin-top:0">
   用这份代码跑一遍这道题的<b>全部测试点</b>，看数据、时限、内存设置有没有问题。
 </p>
+<label>评测规则 <select id="test-io"><option value="file">CSP：文件输入输出（默认）</option><option value="stdin">OI / IOI：标准输入输出</option></select></label>
 <div class="codebox-bar">
   <span><span class="ok">✓</span> <span id="test-file">标程.cpp</span> · <span id="test-count">—</span></span>
   <span class="muted" id="test-note"></span>
@@ -845,10 +817,8 @@ class AdminPages:
     """管理端的所有页面与接口（由 web.server.Handler 混入）。"""
 
     def _admin_login(self):
-        self._send(page("管理端", self._flash("err", "需要管理密钥。密钥在服务器 "
-                                                   "/root/csp-exam/data/admin_key.txt。") +
-                        '<p class="muted">从评测站导航「比赛」进入可免密钥（登录过管理员后会自动记住）。</p>'),
-                   403)
+        from .scoreboard import render_login
+        self._send(render_login(getattr(self, "path", "/admin")), 403)
 
     def _admin_nav(self, key: str = "", cid: str = "") -> str:
         """管理端顶部那排快捷入口。
@@ -859,10 +829,11 @@ class AdminPages:
         links = ['<a href="' + admin_url(key) + '">比赛列表</a>']
         if cid:
             links.append(f'<a href="{admin_url(key, cid)}">本场管理</a>')
-            links.append(f'<a href="/admin/scores{html.escape(cid_query(key, cid))}">成绩总表</a>')
+            links.append(f'<a href="/admin/scoreboard{html.escape(cid_query(key, cid))}">排行榜</a>')
             links.append(f'<a href="/admin/print{html.escape(cid_query(key, cid))}" target="_blank">考号表</a>')
         links.append(f'<a href="{admin_url(key, path="/admin/groups")}">名单分组</a>')
         links.append(f'<a href="{admin_url(key, path="/admin/problems")}">题目列表</a>')
+        links.append(f'<a href="{admin_url(key, path="/admin/judge")}">评测设置</a>')
         links.append(f'<a href="{admin_url(key, path="/admin/problem")}">新建题目</a>')
         links.append('<a href="/docs/problemset" target="_blank">导入题单文档</a>')
         links.append('<a href="/" target="_blank">学生端入口</a>')
@@ -947,7 +918,7 @@ class AdminPages:
                 f'{"已公布" if rel else "未公布"}</td>'
                 f'<td class="muted">{html.escape(c.get("created_at", ""))}</td>'
                 f'<td><a class="btn btn-sm" href="/admin{cid_query(key, c["id"])}">管理</a> '
-                f'<a class="btn btn-sm btn-gray" href="/admin/scores{cid_query(key, c["id"])}">成绩</a> '
+                f'<a class="btn btn-sm btn-gray" href="/admin/scoreboard{cid_query(key, c["id"])}">排行榜</a> '
                 f'{rel_btn}'
                 f'<form method="post" action="/admin/delete{cid_query(key, c["id"])}" style="display:inline" '
                 f'onsubmit="return confirm(\'确定删除这场比赛？名单、成绩、提交的代码都会一起删除。\')">'
@@ -1165,33 +1136,18 @@ class AdminPages:
         problems = []
         try:
             problems = localoj.list_problems()
-        except hydro.HydroError as e:
+        except OSError as e:
             flash = self._flash("err", f"读取题目列表失败：{e}")
 
-        # 本场名单表：**不显示评测站密码** —— 那是判分时系统自己登录学生账号用的
-        # （见 core/grading.py 的 judge_csp → hydro.submit(uname, pw, …)），老师不需要看到
         rows = "".join(
             f'<tr><td>{html.escape(r["kaohao"])}</td><td>{html.escape(r["name"])}</td>'
-            f'<td>{"已建" if r.get("uid") else "未建"}</td>'
             f'<td>{"已提交" if r.get("submitted") else "—"}</td></tr>' for r in roster)
-        pending = sum(1 for r in roster if not r.get("uid"))
-        # 这两个按钮原来各自是一个 <form>；现在名单表挪进第 2 节的卡片里（那张卡在
-        # 整页唯一的「保存」表单里），**表单不能嵌套**，所以改用 formaction：
-        # 按钮是保存表单的一部分，但点它时提交到另一个地址。两个处理函数都只读
-        # URL 里的 key/c，多余的字段会被忽略。
-        make_acct = (f'<p style="margin-top:10px">'
-                     f'<button type="submit" class="btn-gray"'
-                     f' formaction="/admin/accounts{cid_query(key, cid)}">'
-                     f'提前建好本场 {pending} 个账号</button>'
-                     f'<span class="muted"> 不点也没关系：学生第一次提交时会自动建'
-                     f'（每个账号要启动一次评测站进程，所以后台串行创建，慢一点但不会拖垮服务器）</span>'
-                     f'</p>') if pending else ''
         roster_table = (
             f'<h3 style="font-size:15px;margin:20px 0 6px">本场名单（{len(roster)} 人）'
             f'<span class="muted"> 考号随机分配，发下去之前建议点开「考号表」核对</span></h3>'
             f'<div style="overflow:auto">'
-            f'<table><tr><th>考号</th><th>姓名</th><th>评测站账号</th><th>提交</th></tr>'
-            f'{rows}</table></div>{make_acct}' if roster else
+            f'<table><tr><th>考号</th><th>姓名</th><th>提交</th></tr>'
+            f'{rows}</table></div>' if roster else
             '<p class="muted" style="margin-top:14px">本场还没有名单，用上面的分组或粘贴名单导入。</p>')
         group_options = "".join(
             f'<option value="{html.escape(g.get("gid", ""))}">'
@@ -1578,6 +1534,8 @@ class AdminPages:
             source = "粘贴的名单"
         if not names:
             return "", False
+        if mode == "replace" and store.load_results(cid):
+            return "本场已有提交，不能重建名单；请新建比赛。", False
         if mode == "replace":
             before = len(store.load_roster(cid))
             roster = store.replace_roster(cid, names, prefix=prefix)
@@ -1588,40 +1546,7 @@ class AdminPages:
             note = (f"已按{source}导入：本场现在 {len(roster)} 人"
                     f"（新增 {len(roster) - before} 人，考号随机分配）。")
         store.update_contest(cid, prefix=prefix)
-        # 账号改成「学生第一次提交时自动建」（见 ensure_account）：
-        # 建一个账号要启动一整套 Hydro 进程，一次导入给全班每人起一个会把机器压垮
-        # （踩过：三场考试连导，2 核机器直接卡死）。要提前建就在本场管理里点按钮。
-        fresh = sum(1 for v in roster.values() if not v.get("uid"))
-        if fresh:
-            note += (f" 其中 {fresh} 人的评测站账号会在各自第一次提交时自动创建"
-                     "（想提前全部建好，点本场管理里的「提前建好账号」）。")
         return note, True
-
-    def _create_accounts(self, cid: str, unames: list[str]):
-        """后台给本场学生开评测站账号（限速串行，一个建完再建下一个）。"""
-        # 判题不用评测站账号了（本地沙箱跑），所以这一步**没有事要做**：
-        # 函数与接口保留，只是立刻返回 —— 老师的操作流程（点「建账号」）不用变，
-        # 页面上也不会再冒出"账号建失败"这类跟判题无关的报错。
-        log(f"[管理端] 本场 {cid} 无需建评测站账号（判题在本地沙箱跑）：{len(unames)} 个考号跳过")
-
-    def _admin_accounts(self):
-        """提前把本场名单的评测站账号都建好（后台限速执行，可以随时做别的事）。"""
-        q = self._query()
-        if not self._check_admin(q.get("key", "")):
-            self._json({"ok": False, "error": "管理密钥不正确"}, 403)
-            return
-        cid = q.get("c", "")
-        if not store.get_contest(cid):
-            self._redirect(admin_url(q.get("key", ""), msg="比赛不存在"))
-            return
-        todo = [v.get("uname") for v in store.load_roster(cid).values() if not v.get("uid")]
-        if not todo:
-            self._redirect(admin_url(q.get("key", ""), cid, "本场账号都建好了，不用再建。"))
-            return
-        self._create_accounts(cid, todo)
-        self._redirect(admin_url(
-            q.get("key", ""), cid,
-            f"正在后台建 {len(todo)} 个账号（每个约几秒，串行执行，建完刷新页面能看到「已建」）。"))
 
     def _admin_reshuffle(self):
         """把本场考号重新随机分配（已有提交时拒绝，否则成绩会错位）。"""
@@ -1645,7 +1570,7 @@ class AdminPages:
         roster = store.reshuffle_kaohaos(cid, prefix=contest.get("prefix", store.DEFAULT_PREFIX))
         self._redirect(admin_url(q.get("key", ""), cid,
                                  f"已重新随机分配 {len(roster)} 个考号（学生不变，考号全换）。"
-                                 "新账号会在学生第一次提交时自动创建（也可以点「提前建好账号」）。"))
+                                 "请使用新的考号登录并提交。"))
 
     def _admin_print(self, q: dict):
         """考号表：打印出来发给学生（含本场的专用考试链接 + 发给学生时的提醒清单）。"""
@@ -1782,7 +1707,8 @@ class AdminPages:
         if action == "update":
             g = store.update_group(form.get("gid", ""), name=form.get("group_name"),
                                    names=names)
-            msg = f"分组「{(g or {}).get('name', '?')}」已更新，{len((g or {}).get('students') or [])} 人。"
+            msg = (f"分组「{g['name']}」已更新，{len(g.get('students') or [])} 人。"
+                   if g else "分组不存在，未保存。")
             self._redirect(admin_url(key, msg=msg, path="/admin/groups"))
             return
         if action == "delete":
@@ -1862,7 +1788,7 @@ class AdminPages:
         titles = {}
         try:
             titles = {str(p["pid"]): p["title"] for p in localoj.list_problems()}
-        except hydro.HydroError:
+        except OSError:
             pass
 
         problems, notes, new_numbers, used_names = [], [], [], set()
@@ -1964,10 +1890,14 @@ class AdminPages:
             self._redirect(admin_url(q.get("key", ""), cid, self._apply_settings(cid, contest, form)))
             return
         if "released" in form:
-            exam["released"] = form["released"] == "1"
-            store.save_exam(cid, exam)
-            store.update_contest(cid, released=exam["released"])
+            try:
+                store.set_released(cid, form["released"] == "1")
+            except ValueError as e:
+                self._redirect(admin_url(q.get("key", ""), cid, str(e)))
+                return
         if "open" in form:
+            if form["open"] == "1" and not contest.get("open", True):
+                store.update_contest(cid, started_at=int(time.time()))
             contest["open"] = form["open"] == "1"
             store.update_contest(cid, open=contest["open"])
         self._redirect(admin_url(q.get('key', ''), cid, "已更新。"))
@@ -2039,69 +1969,10 @@ class AdminPages:
         return "本场设置（" + "；".join(notes) + "）"
 
     def _admin_scores(self, q: dict):
-        key = q.get("key", "")
-        if not self._check_admin(key):
-            self._admin_login()
-            return
-        cid = q.get("c", "")
-        contest = store.get_contest(cid)
-        if not contest:
-            self._admin_home(q)
-            return
-        exam = store.load_exam(cid)
-        rule = store.rule_of(contest)
-        rows = store.ranking(cid, include_all=True)
-        probs = exam.get("problems", [])
-        head = "".join(
-            f'<th>{html.escape(store.slug_of(p))}'
-            f'<span class="muted">/{p.get("full", 100)}</span></th>' for p in probs)
-        body_rows = []
-        # 一行占满整张表的空表提示（列数 = 名次/姓名/考号 + 每题 + 总分/提交时间）
-        n_col = 6 + len(probs)
-        for r in rows:
-            cells = []
-            for p in probs:
-                key_ = store.problem_dir_name(int(p["no"]))
-                got = r["problems"].get(key_) or {}
-                full = int(p.get("full", 100))
-                if not got:
-                    # 区分"交了但 0 分"和"压根没交"
-                    cells.append('<td class="muted">未交</td>')
-                    continue
-                score = int(got.get("score") or 0)
-                st = graded_text(got, full)
-                cls = "ok" if score >= full else ("part" if score > 0 else "err")
-                # 点分数进详情页，看这一题的完整提交结果与代码
-                link = (f'<a class="{cls}" href="/admin/student{cid_query(key, cid, kaohao=r["kaohao"])}'
-                        f'#{key_}">{score}</a>')
-                cells.append(f'<td>{link}'
-                             f'<span class="muted"> {html.escape(st)}</span></td>')
-            who = (f'<a href="/admin/student{cid_query(key, cid, kaohao=r["kaohao"])}">'
-                   f'{html.escape(r["kaohao"])}</a>')
-            body_rows.append(
-                f'<tr><td>{r["rank"]}</td><td>{html.escape(r["name"])}</td>'
-                f'<td>{who}</td>{"".join(cells)}'
-                f'<td><b>{r["total"]}</b></td><td class="muted">{html.escape(r["at"])}</td></tr>')
-        missing = [k for k in store.load_roster(cid) if k not in store.load_results(cid)]
-        miss_html = ("<p class='warn'>还没有提交的学生：" +
-                     "、".join(f'{html.escape(store.student_name(cid, k))}（{k}）' for k in missing) +
-                     "</p>") if missing else ""
-        # 一行占满整张表的空表提示（列数 = 名次/姓名/考号 + 每题 + 总分/提交时间）
-        empty_row = f"<tr><td colspan='{n_col}' class='muted'>还没有任何提交</td></tr>"
-        body = f"""
-{self._admin_nav(key, cid)}
-<p>{rule_badge(contest)} {level_badge(contest)}
-   <b>{html.escape(contest["title"])}</b>
- · {"成绩已公布" if exam.get("released") else "成绩未公布"}</p>
-<p class="muted">每题按<b>测试点</b>给分：通过几个点就拿几个点的分（每点满分 = 每题满分 ÷ 测试点数），
- 不再是「子任务里有一个点没过就整段 0 分」。点某题分数进该学生的「提交详情」，
- 里面有逐点明细，点每行的状态还能看这一点的输入、学生输出和标准答案。</p>
-<div class="card" style="overflow:auto">
-<table class="nowrap"><tr><th>名次</th><th>姓名</th><th>考号</th>{head}<th>总分</th><th>提交时间</th></tr>
- {"".join(body_rows) or empty_row}</table>
-</div>
-{miss_html}"""
-        self._send(page(f"成绩总表 · {contest['title']}", body))
+        """兼容旧成绩链接，管理端始终使用同一排行榜。"""
+        from .scoreboard import route
+        return route(self, q, "/admin/scoreboard")
+
     def _admin_file(self, q: dict):
         """管理员看学生提交的某个文件（预览/下载）。"""
         key = q.get("key", "")
@@ -2137,7 +2008,7 @@ class AdminPages:
         #   加进来的都是 0 分、排在最后，已交学生的名次不受影响）
         ranked = store.ranking(cid, include_all=True)
         rank = next((r["rank"] for r in ranked if r["kaohao"] == kaohao), "—")
-        back = f'/admin/scores{cid_query(key, cid)}'
+        back = f'/admin/scoreboard{cid_query(key, cid)}'
         # 快速换人：这一页一次只看一个学生，老师常常要连着看好几个（查完一个看下一个），
         # 给个下拉直接跳，省得每次都回「成绩总表」再点进来。顺序就是成绩总表的顺序
         # （总分从高到低），选项里带着名次/姓名/考号/总分，找人也方便；
@@ -2152,7 +2023,7 @@ class AdminPages:
                 opts.append(
                     f'<option value="{html.escape(kh, quote=True)}"'
                     + (" selected" if kh == kaohao else "")
-                    + f'>第 {r["rank"]} 名 · {html.escape(str(r.get("name") or "?"))}'
+                    + f'>名次 {r["rank"] if r["rank"] is not None else "—"} · {html.escape(str(r.get("name") or "?"))}'
                       f'（{html.escape(kh)}）· {r["total"]} 分'
                     + ("" if r.get("submitted") else " · 未交")
                     + '</option>')
@@ -2168,8 +2039,11 @@ class AdminPages:
                 '<noscript><button type="submit">看这位</button></noscript>'
                 f'<span class="muted">第 {pos} / {len(ranked)} 个</span>'
                 '</form>')
+        pending = bool(entry and (entry.get("judging") or entry.get("rejudge_error") or entry.get("submission_state") in ("queued", "judging", "error")
+                       or any(p.get("pending") for p in entry.get("problems", {}).values())))
+        review_state = "待补资料" if entry and entry.get("rejudge_error") else "评测未完成"
         head = (f'{self._admin_nav(key, cid)}'
-                f'<p><a class="btn btn-gray" href="{back}">← 返回成绩总表</a></p>'
+                f'<p><a class="btn btn-gray" href="{back}">← 返回排行榜</a></p>'
                 + picker +
                 f'<h1>{html.escape(info.get("name", "?"))}'
                 f'<span class="muted"> · {html.escape(kaohao)}</span></h1>'
@@ -2177,7 +2051,7 @@ class AdminPages:
                     f' <b>{html.escape(contest["title"])}</b></p>')
         if not entry:
             self._send(page(f"提交详情 · {kaohao}",
-                            head + self._flash("info", "这位学生还没有提交。")), 404)
+                            head + self._flash("info", "这位学生还没有提交。")), 200 if info else 404)
             return
 
         # 概要
@@ -2185,11 +2059,14 @@ class AdminPages:
         if not entry.get("problems"):
             no_sub = self._flash("info", "这位学生一次有效提交都没有（成绩表里的 0 分是缺席，不是答错）。")
         head += (f'<div class="card"><div class="kv">'
-                 f'<div><b>总分</b>{store.entry_total(entry)} 分</div>'
-                 f'<div><b>名次</b>第 {rank} 名</div>'
+                 f'<div><b>总分</b>{"—" if pending else str(store.entry_total(entry, cid)) + " 分"}</div>'
+                 f'<div><b>名次</b>{"—" if pending else "第 " + str(rank) + " 名"}</div>'
                  f'<div><b>提交时间</b>{html.escape(entry.get("submitted_at", ""))}</div>'
-                     f'<div><b>状态</b>{"成绩已公布" if exam.get("released") else "成绩未公布"}</div>'
+                     f'<div><b>状态</b>{review_state if pending else "成绩已公布" if exam.get("released") else "成绩未公布"}</div>'
                  f'</div></div>{no_sub}')
+
+        if entry.get("rejudge_error"):
+            head += self._flash("err", "历史资料待核对：" + entry["rejudge_error"] + "。下方结果仅供核对，未作为本次重测成绩公布。")
 
         # 学生实际传上来的目录结构（老师排查"为什么这题 0 分"第一眼要看的就是这个）
         picked_note = {}
@@ -2240,7 +2117,7 @@ class AdminPages:
                      f' · 点文件名即可查看内容</span></h2>'
                      f'{tree_text}'
                      f'<p class="muted">{legend}；括号里是文件大小，'
-                     f'原始文件在服务器 <code>{html.escape(os.path.join(base, ""))}</code></p>'
+                     '</p>'
                      f'{person_html}</div>')
         miss = entry.get("missing_sources") or []
         if miss:
@@ -2292,7 +2169,7 @@ class AdminPages:
                                   if err_text else
                                   '<p class="muted">（评测机没有回传编译器报错原文，'
                                   '下面「查看提交的代码」里可以直接看代码。）</p>'))
-                elif st in hydro.STATUS_PENDING:
+                elif st in verdict.STATUS_PENDING:
                     tp_html = ('<h3 style="font-size:15px;margin:16px 0 6px">测试点明细</h3>'
                                '<div class="tp-card"><b>还在评测中…</b>'
                                '<p class="muted" style="margin:6px 0 0">刷新一下页面就能看到逐点结果。</p></div>')
@@ -2308,13 +2185,17 @@ class AdminPages:
             src_html = ""
             rel = got.get("file") or ""
             if rel:
-                path = os.path.join(store.upload_dir(cid, kaohao), rel)
+                try:
+                    path = submissions.confined_file(store.upload_dir(cid, kaohao), rel)
+                except ValueError:
+                    path = ""
                 if os.path.isfile(path):
                     try:
-                        src_text = open(path, encoding="utf-8", errors="replace").read()
+                        with open(path, encoding="utf-8", errors="replace") as source:
+                            src_text = source.read()
                     except OSError:
                         src_text = ""
-                    src_html = ('<details><summary>查看提交的代码（'
+                    src_html = ('<details class="submission-source"><summary>查看提交的代码（'
                                 f'{html.escape(rel)}）</summary>'
                                 '<pre class="code-view">' + html.escape(src_text) + '</pre></details>')
                 else:
@@ -2333,6 +2214,22 @@ class AdminPages:
         # 测试点详情弹窗的取数地址（c/k 固定，n=第几题、t=第几个点由页面 JS 补）
         tp_query = cid_query(key, cid, kaohao=kaohao)
         script = (f'<script>window.CSP_TP_QUERY = {json.dumps(tp_query)};</script>' + TP_JS)
+        # 排行榜分数链接带题号：直接展开该题源码，普通详情入口保留折叠。
+        script += '''<script>
+function openLinkedSource(){
+  if(!/^#T[0-9]+$/.test(location.hash))return;
+  const block=document.getElementById(location.hash.slice(1));
+  const source=block&&block.querySelector('details.submission-source');
+  if(source){
+    source.open=true;
+    const nav=document.querySelector('.admin-nav');
+    source.style.scrollMarginTop=((nav?nav.getBoundingClientRect().height:0)+16)+'px';
+    requestAnimationFrame(()=>source.scrollIntoView({block:'start'}));
+  }
+}
+openLinkedSource();window.addEventListener('load',openLinkedSource,{once:true});
+window.addEventListener('hashchange',openLinkedSource);
+</script>'''
         self._send(page(f"提交详情 · {kaohao}",
                         head + "".join(blocks) + _tp_detail_modal() + script))
 
@@ -2356,7 +2253,7 @@ class AdminPages:
             try:
                 items = localoj.list_problems()
                 store.save_catalog(items)
-            except (hydro.HydroError, OSError) as e:
+            except OSError as e:
                 err = f"读取评测站题库失败：{e}"
         codes = make_problem.load_codes()
         info = load_problem_info()
@@ -2844,7 +2741,7 @@ class AdminPages:
             return
         try:
             store.save_catalog(localoj.list_problems())
-        except (hydro.HydroError, OSError) as e:                 # noqa: BLE001
+        except OSError as e:                 # noqa: BLE001
             log(f"[管理端] 覆盖重传 {pid}：刷新题库缓存失败 {e!r}")
         # 元信息也要按新的记一遍（题目名 / 测试点数 / 标程）——「题目列表」和题目详情页
         # 里的"测试点 N 个、标程、题目名"读的都是 `problem_info.json`，
@@ -2860,7 +2757,7 @@ class AdminPages:
             stmt_len = len(localoj.problem_statement(pid) or "")
         except Exception:                                        # noqa: BLE001
             stmt_len = 0
-        n_std = len(std)
+        n_std = len(str((load_problem_info().get(pid) or {}).get("std") or ""))
         log(f"[管理端] 覆盖重传 {pid}：{rep.get('cases')} 组数据、题面 {stmt_len} 字、标程 {n_std} 字")
         self._redirect(problem_detail_url(key, pid, msg=(
             f"已用文件夹覆盖重传（{rep.get('title') or pid}）："
@@ -2948,11 +2845,11 @@ class AdminPages:
         title = str(prob.get("title") or "")
         c_in = case.get("input") or ""
         c_out = case.get("output") or ""
-        c_ans = case.get("answer") or ""
+        c_ans = case.get("answer", case.get("expected", "")) or ""
         # 评测记录里只有判定/用时/内存（Hydro 不存内容）。这时**输入和标准答案**
         # 还能从题目的数据文件里补出来（1.in / 1.out，与测试点 id 一一对应）；
         # 学生输出评测机比完就丢，补不回来——页面上会写明「评测机没有保存」。
-        if not (c_in or c_ans):
+        if not c_in or not c_ans:
             try:
                 # 落盘的逐点数据里序号叫 `no`（"01"），原始记录里叫 `id`；两个都试。
                 # read_problem_case 内部会 int()，"01" 与 1 等价。
@@ -2969,7 +2866,7 @@ class AdminPages:
             "code": store.code_of(prob),
             "title": title,
             "status": case.get("status"),
-            "status_text": case.get("status_text") or hydro.status_text(case.get("status")),
+            "status_text": case.get("status_text") or verdict.status_text(case.get("status")),
             "cls": "ok" if _tp_ok(case) else "err",
             "time_text": _fmt_ms(case.get("time")),
             "memory_text": _fmt_kb(case.get("memory")),
@@ -2984,13 +2881,13 @@ class AdminPages:
             "detail_file": case.get("detail_file") or "",
             "verdict": _case_verdict(case, full),
             "foot": ("这一点的输入与标准答案来自题目数据文件；判定/用时/内存来自判分记录。"
-                     "学生输出评测机不保存，所以看不到。"
+                     "时间与内存取自本次评测记录，过长内容显示节选。"
                      if has_content else
                      "这一点的数据来自这笔判分记录（第 %s 题 %s 的第 %s 个测试点）。"
                      % (pno, store.code_of(prob), str(case.get("no") or want))),
         })
 
-    def _submit_as_admin(self, pid: str, source: str, ext: str = ".cpp") -> tuple[bool, str, dict]:
+    def _submit_as_admin(self, pid: str, source: str, ext: str = ".cpp", *, io_mode="file") -> tuple[bool, str, dict]:
         """跑一份代码的**全部测试点**，返回 (是否成功, 错误说明, 结果行)。
 
         「自己测试」和建题后的「标程自测」都走这里。名字是历史遗留（以前"以评测站
@@ -2999,10 +2896,10 @@ class AdminPages:
         所以下面渲染逐点明细的代码原样能用。
         """
         rec = load_problem_info().get(pid) or {}
-        code = make_problem.code_of_pid(pid) or str(rec.get("name") or "") or "main"
+        code = make_problem.name_of_pid(pid) or str(rec.get("name") or "") or "main"
         full = 100                      # 「自己测试」看的是点数与用时，满分按 100 折算
         try:
-            row = localoj.judge(pid, source, ext, code=code, full=full, io_mode="auto")
+            row = localoj.judge(pid, source, ext, code=code, full=full, io_mode=io_mode)
         except Exception as e:                                # noqa: BLE001
             return False, f"判题失败（{e}）", {}
         if row.get("note"):
@@ -3050,7 +2947,10 @@ class AdminPages:
         if not pid or not source.strip():
             self._json({"ok": False, "error": "缺少题目或代码。请点题目行的「自己测试」再填代码。"}, 400)
             return
-        ok, err, row = self._submit_as_admin(pid, source)
+        io_mode = form.get("io_mode", "file")
+        if io_mode not in ("file", "stdin"):
+            return self._json({"ok": False, "error": "请选择 CSP 文件输入输出或 OI 标准输入输出"}, 400)
+        ok, err, row = self._submit_as_admin(pid, source, io_mode=io_mode)
         if not ok:
             self._json({"ok": False, "error": err}, 200)
             return
@@ -3063,20 +2963,22 @@ class AdminPages:
         self._json({
             "ok": True,
             "record_id": row.get("record_id", ""),
-            "status_text": hydro.status_text(row.get("status")),
+            "status_text": verdict.status_text(row.get("status")),
             "total": len(cases),
             "passed": passed,
-            "time_ms": time_ms,
+            "time_ms": int(row.get("effective_time_ms") or time_ms),
+            "official_time_ms": time_ms,
+            "time_scale": row.get("time_scale", 1),
             "slowest_ms": slowest,
             "peak_kb": peak,
             "cases": [{"no": str(c.get("no") or i).zfill(2),
-                       "status_text": c.get("status_text") or hydro.status_text(c.get("status")),
+                       "status_text": c.get("status_text") or verdict.status_text(c.get("status")),
                        "mark": _tp_mark(c.get("status"))[0],
                        "cls": _tp_mark(c.get("status"))[1],
                        "time_text": _fmt_ms(c.get("time")),
                        "memory_text": _fmt_kb(c.get("memory"))}
                       for i, c in enumerate(cases, 1)],
-            "verdict": self._selftest_verdict(cases, time_ms, passed, len(cases), slowest, peak),
+            "verdict": self._selftest_verdict(cases, int(row.get("effective_time_ms") or time_ms), passed, len(cases), slowest, peak),
         })
 
     def _api_problem_catalog(self, q: dict):
@@ -3097,7 +2999,7 @@ class AdminPages:
                 items = localoj.list_problems()
                 store.save_catalog(items)
                 cat = store.load_catalog()
-            except hydro.HydroError as e:
+            except OSError as e:
                 err = f"读取评测站题库失败：{e}"
         codes = make_problem.load_codes()
         info = load_problem_info()
@@ -3566,7 +3468,7 @@ class AdminPages:
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }}
-  function isIn(n) {{ return /\.in$/i.test(n); }}
+  function isIn(n) {{ return /\\.in$/i.test(n); }}
 
   /* 把 FileList 整理成「路径 → File」和「目录 → 直接子项列表」两张表 */
   function index(files) {{
@@ -3630,7 +3532,7 @@ class AdminPages:
     var cases = 0, sml = 0;
     files.forEach(function (n) {{
       if (n.indexOf('/') >= 0 || !isIn(n)) return;
-      var stem = n.replace(/\.in$/i, '');
+      var stem = n.replace(/\\.in$/i, '');
       var hasOut = ['out', 'ans'].some(function (e) {{
         return Object.prototype.hasOwnProperty.call(idx.map, where + '/' + stem + '.' + e);
       }});
@@ -3934,7 +3836,7 @@ class AdminPages:
             return
         title = str((load_problem_info().get(pid) or {}).get("title") or pid)
         self._set_problem_deleted(pid, True)
-        log(f"[管理端] 假删除题目 {pid}（{title}）：题面/大样例/编号/评测站都保留")
+        log(f"[管理端] 假删除题目 {pid}（{title}）：题面/大样例/编号/测试数据都保留")
         self._finish_problem_action(key, (
             f"已删除题目 {pid}（{title}）—— 只是从列表里收起来了："
             f"题面和历史提交记录都还看得到。要找回来，在下面「已删除的题目」里点「恢复」。"
@@ -3965,8 +3867,8 @@ class AdminPages:
         日常"删掉不想要的题"用假删除（`_delete_problem`）就够了，别走这条。
         """
         pid = (pid or "").strip()
-        if not pid:
-            self._finish_problem_action(key, "没有指定要删哪道题。", ok=False)
+        if not judgelocal.valid_pid(pid):
+            self._finish_problem_action(key, "题目标识无效。", ok=False)
             return
         used = self._problem_in_use(pid)
         if used:
@@ -4000,7 +3902,7 @@ class AdminPages:
         # 题库缓存也刷新一下，别再列出这道题
         try:
             store.save_catalog(localoj.list_problems())
-        except (hydro.HydroError, OSError) as e:
+        except OSError as e:
             log(f"[管理端] 彻底删题 {pid}：刷新题库缓存失败 {e!r}")
         log(f"[管理端] 彻底删除题目 {pid}（{title}），清掉了：{'、'.join(done) or '无（本来就没有）'}"
             + (f"；**没删掉**：{'、'.join(failed)}" if failed else ""))
@@ -4288,6 +4190,11 @@ class AdminPages:
         if blob[:2] != b"PK":
             self._json({"ok": False, "error": "上传的不是 zip 文件"}, 400)
             return
+        with PS_JOBS_LOCK:
+            if sum(info.get("state") == "running" for info in PS_JOBS.values()) >= 2:
+                return self._json({"ok": False, "error": "已有题单正在导入，请稍后重试。"}, 429)
+            completed = [k for k, v in PS_JOBS.items() if v.get("state") != "running"]
+            for old in completed[:-62]: PS_JOBS.pop(old, None)
         job = "ps-%d-%s" % (int(time.time()), os.urandom(3).hex())
         work = os.path.join(HERE, "ps-jobs", job)
         os.makedirs(work, exist_ok=True)
@@ -4357,16 +4264,6 @@ def _ps_worker(job: str, zip_path: str, opts: dict) -> None:
             code=single_code, codes=codes, log=progress)
         summary = (f"完成：成功 {len(report['imported'])}、跳过 {len(report['skipped'])}、"
                    f"失败 {len(report['failed'])}，耗时 {report['elapsed_s']}s")
-        # 导入成功的题也记一份元信息（测试点数/时限/内存），「题目列表」页要显示这三列
-        if not report.get("dry_run"):
-            for item in report.get("problems") or []:
-                if item.get("status") == "imported":
-                    remember_problem(item.get("pid", ""), title=item.get("title", ""),
-                                     code=item.get("number") or item.get("code", ""),
-                                     name=item.get("name", ""),
-                                     cases=item.get("case_count"),
-                                     time_ms=opts.get("time_ms"),
-                                     memory_mb=opts.get("memory_mb"))
         with PS_JOBS_LOCK:
             PS_JOBS[job].update(state="done" if report.get("ok") else "failed",
                                 report=report, progress=summary)
@@ -4376,3 +4273,8 @@ def _ps_worker(job: str, zip_path: str, opts: dict) -> None:
         with PS_JOBS_LOCK:
             PS_JOBS[job].update(state="failed", error=str(exc),
                                 progress="导入失败：" + str(exc)[:200])
+    finally:
+        work = os.path.realpath(os.path.dirname(zip_path))
+        parent = os.path.realpath(os.path.join(HERE, "ps-jobs"))
+        if os.path.dirname(work) == parent and os.path.basename(work) == job:
+            shutil.rmtree(work, ignore_errors=True)

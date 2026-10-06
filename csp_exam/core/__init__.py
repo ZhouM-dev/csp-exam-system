@@ -1,3 +1,1 @@
-"""业务核心层：不依赖 HTTP，可单独 import 用于脚本与测试。"""
-
-from . import hydro_client, importer, problems, store, util, wrapper  # noqa: F401
+"""核心业务与数据模块。页面通过显式包导入使用各模块。"""

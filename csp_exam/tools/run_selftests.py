@@ -39,7 +39,7 @@ def main() -> int:
             print("  [失败] %-28s" % name)
             print("\n".join("      " + l for l in out.strip().splitlines()[-6:]))
     print()
-    print("自测：%d 套通过，%d 套失败，共 %d 项断言" % (ok, fail, total))
+    print("自测：%d 套通过，%d 套失败" % (ok, fail))
     return 1 if fail else 0
 
 

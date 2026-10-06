@@ -6,11 +6,10 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))   # -> src/
-import csp_exam.compat  # noqa: F401  （登记平铺模块名，兼容老写法）
-from csp_exam.core import hydro_client, importer, problems, store, wrapper  # noqa: E402
+from csp_exam.core import importer, problems, store, wrapper  # noqa: E402
 
 # 直接构造一个假的 handler，复用它的解析逻辑
-import exam_server as es
+from csp_exam.web import server as es
 
 
 class FakeHandler(es.Handler):

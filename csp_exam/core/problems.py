@@ -25,13 +25,6 @@ import zipfile
 from . import importer as ip, localoj
 from . import judgelocal as judge_local
 
-PROBLEM_YAML = """title: {title}
-pid: {pid}
-tag:
-{tags}
-difficulty: {difficulty}
-"""
-
 DEFAULT_TIME_MS = 1000
 DEFAULT_MEMORY_MB = 256
 
@@ -652,42 +645,6 @@ def take_statement(files: dict[str, bytes], explicit: str = "") -> tuple[str, st
     return "", ""
 
 
-def build_package(dest_root: str, pid: str, title: str, cases: list[dict],
-                  files: dict[str, bytes], *, time_ms: int = DEFAULT_TIME_MS,
-                  memory_mb: int = DEFAULT_MEMORY_MB, statement: str = "",
-                  std_source: str = "", tags: list[str] | None = None,
-                  difficulty: int = 3) -> str:
-    """把一道题写成 Hydro 题目包，返回包目录。
-
-    时限/内存写在 testdata/config.yaml（Hydro 导入器认这个文件名；
-    只写 problem.yaml 的 config 字段对已存在的题目不生效——踩过这个坑）。
-    """
-    root = os.path.join(dest_root, pid)
-    shutil.rmtree(root, ignore_errors=True)
-    os.makedirs(os.path.join(root, "testdata"), exist_ok=True)
-    tags = list(tags or ["管理端新建"])
-    with open(os.path.join(root, "problem.yaml"), "w", encoding="utf-8") as f:
-        f.write(PROBLEM_YAML.format(
-            title=title, pid=pid, difficulty=difficulty,
-            tags="\n".join(f"  - {t}" for t in tags), ))
-    with open(os.path.join(root, "testdata", "config.yaml"), "w", encoding="utf-8") as f:
-        f.write(f"time: {time_ms}\nmemory: {memory_mb}\n")
-    with open(os.path.join(root, "problem_zh.md"), "w", encoding="utf-8") as f:
-        f.write(statement or f"# {title}\n\n（还没写题面）\n")
-    for i, case in enumerate(cases, 1):
-        with open(os.path.join(root, "testdata", f"{i}.in"), "wb") as f:
-            f.write(files[case["in"]])
-        if case.get("out"):
-            with open(os.path.join(root, "testdata", f"{i}.out"), "wb") as f:
-                f.write(files[case["out"]])
-        else:
-            # 没有答案就留空文件，导入后老师可以再补（Hydro 需要成对的 .in/.out）
-            open(os.path.join(root, "testdata", f"{i}.out"), "wb").close()
-    if std_source:
-        os.makedirs(os.path.join(root, "std"), exist_ok=True)
-        with open(os.path.join(root, "std", "solution.cpp"), "w", encoding="utf-8") as f:
-            f.write(std_source)
-    return root
 
 
 def drop_problem_cache(pid: str) -> list[str]:
@@ -698,6 +655,8 @@ def drop_problem_cache(pid: str) -> list[str]:
     返回清掉的东西（给日志/提示用）。
     """
     from . import store
+    if not judge_local.valid_pid(pid):
+        raise ValueError("题目标识无效")
     gone = []
     stmt = os.path.join(store.DATA_DIR, "statements", f"{pid}.md")
     if os.path.isfile(stmt):
@@ -713,6 +672,17 @@ def drop_problem_cache(pid: str) -> list[str]:
     return gone
 
 
+def _problem_write(fn):
+    from functools import wraps
+    @wraps(fn)
+    def locked(*args, **kwargs):
+        from . import store
+        with store._LOCK:
+            return fn(*args, **kwargs)
+    return locked
+
+
+@_problem_write
 def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
                    time_ms: int = DEFAULT_TIME_MS, memory_mb: int = DEFAULT_MEMORY_MB,
                    statement: str = "", std_source: str = "", overwrite: bool = False,
@@ -736,6 +706,7 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
     返回报告里：`number` 是系统分配的**题目编号**（`T00001`，老师侧定位用），
     `name` 是这道题的默认**英文名**，`code` 与 `number` 相同（兼容旧调用点）。
     """
+    from . import store
     pid = (pid or "").strip()
     title = (title or "").strip()
     name = (name or code or "").strip()
@@ -760,7 +731,7 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
         notes = [det["message"]] + notes
     else:
         cases, problems = pair_cases(files)
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", pid or ""):
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", pid or "") or pid in (".", ".."):
         return {"ok": False, "error": "题目标识只能用字母、数字、下划线、点、短横（1~40 个字）；"
                                       "用文件夹上传时会自动取「分类号-题名」里的分类号",
                 "notes": notes}
@@ -782,18 +753,8 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
             pid_from = pid
             pid = fresh
             exists = False          # 新标识本来就是空的，不用先删
-    if overwrite and exists:
-        # 覆盖式重建：同一标识下换了新题面/新数据，旧缓存必须一起作废，
-        # 否则题面页会拿 `data/statements/<pid>.md` 里的旧题面糊弄人。
-        drop_problem_cache(pid)
-
-    # ---- 题目编号：建题时由系统分配（T00001，跟着题走）；英文名记成默认值
-    try:
-        number = assign_number(pid, title=title, name=name)
-    except CodeError as e:
-        return {"ok": False, "error": str(e), "pid": pid, "number": "", "name": "",
-                "code": "", "notes": notes, "cases": len(cases)}
-
+    if overwrite and exists and any(r.get("judging") for c in store.list_contests() if any(p.get("pid") == pid for p in store.load_exam(c["id"]).get("problems", [])) for r in store.load_results(c["id"]).values()):
+        return {"ok": False, "error": "这道题正在评测，请等评测完成再更换数据。"}
     # ---- 测试点内容：把**路径**换成**字节** ----
     # 到这一步 `cases` 里的 `in`/`out` 还是**路径**（`pair_cases()` 与 `detect_bundle()`
     # 给的都是"哪个文件"），判题引擎要的是"文件里是什么"。旧流程是在打包题目时做的
@@ -818,6 +779,15 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
         "in": _content(c["in"]),                        # 路径 → 内容
         "out": _content(c["out"]) if c.get("out") else None,
     } for c in cases]
+
+    if any(c["out"] is None for c in cases):
+        return {"ok": False, "error": "测试点缺少标准答案，题目没有改动。", "pid": pid}
+    # ---- 题目编号：建题时由系统分配（T00001，跟着题走）；英文名记成默认值
+    try:
+        number = assign_number(pid, title=title, name=name)
+    except CodeError as e:
+        return {"ok": False, "error": str(e), "pid": pid, "number": "", "name": "",
+                "code": "", "notes": notes, "cases": len(cases)}
 
     # ---- 题目数据**落到本地题目库**（不再打包推给评测站）
     # 以前这一段的顺序是：先在导入目录拼出题目包 → `hydrooj cli problem import` 推上去
@@ -851,9 +821,13 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
         sample_info = save_samples(pid, [prob["big_samples"], prob["samples"]], files)
         out["samples"] = sample_info
     if ok:
+        remember_problem(pid, title=title, code=number, name=name, cases=len(cases),
+                         time_ms=time_ms, memory_mb=memory_mb, std=std_source)
+        if exists:
+            store.invalidate_problem_results(pid, "题目数据已更新，请重测")
         try:      # 导入成功后刷新题库缓存，配题时立刻能搜到
             from . import store
-            store.save_catalog(ip_hydro_list())
+            store.save_catalog(localoj.list_problems())
             out["catalog_refreshed"] = True
         except Exception as e:      # noqa: BLE001
             out["catalog_refreshed"] = False
@@ -889,7 +863,8 @@ def create_bundle(uploads: dict[str, bytes], *, time_ms: int = DEFAULT_TIME_MS,
             continue
         if on_site is None and not overwrite:
             on_site = localoj.problem_pids()
-        got = create_problem(prob["pid"], prob["title"], files,
+        one_files = {k: v for k, v in files.items() if k.startswith(prob["prefix"] + "/")}
+        got = create_problem(prob["pid"], prob["title"], one_files,
                              time_ms=time_ms, memory_mb=memory_mb,
                              statement=statement, overwrite=overwrite, tags=tags,
                              name=want_names.get(prob["pid"], ""), on_site=on_site)
@@ -908,16 +883,49 @@ def create_bundle(uploads: dict[str, bytes], *, time_ms: int = DEFAULT_TIME_MS,
     return {"ok": ok_all, "items": items, "message": msg, "detected": det["message"]}
 
 
-def ip_hydro_list() -> list[dict]:
-    """题库清单（给缓存刷新用）。
-
-    **名字是历史遗留**（以前从评测站读）；判题换成本地的 go-judge 之后，
-    题库就是本机的题目库了，所以这里直接给本地清单 —— 调用点全都不用改。
-    """
-    return localoj.list_problems()
 
 
 if __name__ == "__main__":      # 手工调试用
     import sys
     print("这是给管理端用的模块；命令行请用 import_problemset.py")
     raise SystemExit(0 if len(sys.argv) == 1 else 2)
+
+
+def remember_problem(pid: str, *, title: str = "", code: str = "", name: str = "", cases=None,
+                     time_ms=None, memory_mb=None, std: str = "") -> None:
+    """建题成功后记下这道题的元信息（空值不覆盖已有的）。
+
+    code —— 题目编号（T00001）；name —— 建题时填的默认英文名（可空）。
+    """
+    pid = str(pid or "").strip()
+    if not pid:
+        return
+    from . import store
+    with store._LOCK:
+        items = load_problem_info()
+        rec = dict(items.get(pid) or {})
+        if title:
+            rec["title"] = str(title)
+        if code:
+            rec["code"] = str(code)
+        if name:
+            rec["name"] = str(name)
+        if cases:
+            rec["cases"] = int(cases)
+        if time_ms:
+            rec["time_ms"] = int(time_ms)
+        if memory_mb:
+            rec["memory_mb"] = int(memory_mb)
+        if std:
+            rec["std"] = str(std)
+        rec["at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        limits_changed = bool(items.get(pid)) and any(
+            rec.get(k) != (items.get(pid) or {}).get(k) for k in ("time_ms", "memory_mb"))
+        if limits_changed and any(r.get("judging") for c in store.list_contests()
+                if any(p.get("pid") == pid for p in store.load_exam(c["id"]).get("problems", []))
+                for r in store.load_results(c["id"]).values()):
+            raise OSError("这道题正在评测，请等评测完成再修改限额。")
+        items[pid] = rec
+        save_problem_info(items)
+        if limits_changed:
+            store.invalidate_problem_results(pid, "题目评测限额已更新，请重测")

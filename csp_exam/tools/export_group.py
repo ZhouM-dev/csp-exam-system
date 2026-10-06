@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """把一个「名单分组」的学生在**每场考试**里的提交代码 + 成绩导出成一个目录树（可重复跑）。
 
-    sudo python3 csp_exam/tools/export_group.py "XX集训S"          # 导到 /root/csp-exam/tests/tmp/export-group
+    sudo python3 csp_exam/tools/export_group.py "XX集训S"          # 导到 /root/csp-exports/export-group
     sudo python3 csp_exam/tools/export_group.py "XX集训S" /tmp/out --tgz
 
 产出（都在输出目录下）：
@@ -34,7 +34,6 @@ import tarfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-import csp_exam.compat  # noqa: F401
 from html import escape as html_escape  # noqa: E402
 from csp_exam.core import localoj, problems as mp, store  # noqa: E402
 from csp_exam.core.markdown import md_to_html  # noqa: E402
@@ -243,7 +242,7 @@ def main() -> int:
         return 2
     group = sys.argv[1]
     out = sys.argv[2] if len(sys.argv) > 2 and not sys.argv[2].startswith('--') \
-        else '/root/csp-exam/tests/tmp/export-group'
+        else '/root/csp-exports/export-group'
     want_tgz = '--tgz' in sys.argv
     if os.path.isdir(out):
         shutil.rmtree(out)

@@ -1,81 +1,6 @@
-"""CSP 模拟赛考试服务 —— freopen 兼容包装。
+"""提交文件匹配、CSP 源码限制与文件输入输出提示。评测直接编译原始源码。"""
 
-背景（实测结论，值得记下来）：
-    这套 Hydro 版本（hydrooj 5.0.7 + @hydrooj/hydrojudge）里，题目配置的
-    `redirect` 字段评测机**根本没实现**；`filename` 字段虽然评测机支持
-    （sandbox.ts 会 copyIn `<filename>.in`、读 `<filename>.out`，且此时 stdin 为空），
-    但后端解析配置时会把它转成 `subType`、**丢掉 filename 本身**，所以传不到评测机。
-    结论：这个版本没法通过题目配置实现「文件输入输出」，只能走标准输入输出。
-
-于是考试服务在提交前给选手代码加一段 C/C++ 包装（学生看不到，提交前自动拼上）：
-
-  1. 程序启动时：把评测机喂进来的 stdin 内容落成 `Tn.in`，并把 stdin 读空
-     —— 于是「写了 freopen("Tn.in")」的代码能读到数据；
-        「忘了写 freopen」的代码只能读到 EOF，拿 0 分（和真实 CSP 一致）；
-        「文件名写错（如 t1.in）」的代码同样拿 0 分（和真实 CSP 一致）。
-  2. 程序结束时：如果选手把 stdout 重定向到了 `Tn.out`，把该文件内容写回原始 stdout，
-     这样评测机读到的就是选手的输出。
-
-包装是纯 C 写的，C 和 C++ 都能编译。
-
-除了包装，这个模块还管「学生交上来的文件怎么对上题目」：
-
-  * `pick_sources()`  —— 找出每题用哪个代码文件（宽松匹配，不退回整份提交）
-  * `find_person_file()` / `person_file_hint()` —— 广东考区强制要求的个人信息文件
-    （考号目录下以本人姓名命名的 txt），不作为判分依据，只用于提示"交没交"
-  * `strict_case()` / `set_strict_case()` —— 大小写严格模式开关（默认关闭=老口径）
-"""
-
-SHIM_TEMPLATE = r'''
-/* ======== 考试系统自动包装：模拟 CSP 的文件输入输出环境（学生提交的原始代码在下方） ======== */
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-
-static const char *__exam_in = "__IN__";
-static const char *__exam_out = "__OUT__";
-static int __exam_saved_stdout = -1;
-
-__attribute__((constructor)) static void __exam_shim_start(void) {
-    __exam_saved_stdout = dup(1);            /* 保存评测机给的原始 stdout */
-    FILE *dst = fopen(__exam_in, "w");       /* 把 stdin 的内容落成 Tn.in */
-    if (dst) {
-        char buf[65536];
-        size_t n;
-        while ((n = fread(buf, 1, sizeof(buf), stdin)) > 0) {
-            fwrite(buf, 1, n, dst);
-        }
-        fclose(dst);
-    }
-    /* 到这里 stdin 已到 EOF：没写 freopen 的代码读不到任何数据 */
-}
-
-__attribute__((destructor)) static void __exam_shim_end(void) {
-    FILE *f;
-    fflush(NULL);                            /* 先把缓冲区刷进选手的输出文件 */
-    /* 选手 freopen 到 Tn.out 时，把内容补回原始 stdout */
-    f = fopen(__exam_out, "rb");
-    if (f) {
-        char buf[65536];
-        size_t n;
-        while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-            size_t off = 0;
-            while (off < n) {
-                ssize_t w = write(__exam_saved_stdout, buf + off, n - off);
-                if (w <= 0) break;
-                off += (size_t)w;
-            }
-        }
-        fclose(f);
-    }
-    if (__exam_saved_stdout >= 0) close(__exam_saved_stdout);
-}
-/* ======== 以下是选手提交的原始代码 ======== */
-'''
-
-#: 支持自动包装的语言后缀
-WRAPPABLE_EXTS = (".cpp", ".cc", ".cxx", ".c++", ".c")
+SUPPORTED_EXTS = (".cpp", ".cc", ".cxx", ".c++", ".c")
 
 #: 学生可能交上来的源码后缀（挑代码文件时用）
 SOURCE_EXTS = (".cpp", ".cc", ".cxx", ".c++", ".c", ".pas")
@@ -177,6 +102,7 @@ def person_file_hint(files: list, student_name: str, *,
 
 def pick_sources(files: list[str], problems: list, *,
                  student_name: str = "", strict: bool | None = None,
+                 strict_layout: bool = False, kaohao: str = "",
                  ) -> tuple[dict[int, str], list[str]]:
     """从学生上传的文件里找出「每题用哪个代码文件」。
 
@@ -291,6 +217,11 @@ def pick_sources(files: list[str], problems: list, *,
     for no, slug in codes:
         free = [p for p in srcs if p not in used]
         hit, rejects = ladder(free, no, slug, strict)
+        if strict_layout:
+            allowed = {f"{slug}/{slug}.cpp"}
+            if kaohao:
+                allowed.add(f"{kaohao}/{slug}/{slug}.cpp")
+            hit = next((p for p in free if p in allowed), "")
         if hit:
             picked[no] = hit
             used.add(hit)
@@ -305,7 +236,9 @@ def pick_sources(files: list[str], problems: list, *,
             else:
                 notes.append(f"{p} 的大小写与题目英文名 {slug} 不一致"
                              f"（严格模式区分大小写，应为 {slug}/ 与 {slug}.cpp），已忽略")
-        if not rejects and strict:
+        if not rejects and strict_layout:
+            notes.append(f"CSP 只采用 {slug}/{slug}.cpp（可置于本考号目录下），其它位置或扩展名不计分")
+        elif not rejects and strict:
             probe, _ = ladder(free, no, slug, False)      # 只为出提示，不参与判分
             if probe:
                 notes.append(f"{probe} 的大小写与题目英文名 {slug} 不一致"
@@ -320,34 +253,47 @@ def pick_sources(files: list[str], problems: list, *,
     return picked, missing
 
 
-def wrap(source: str, base: str) -> str:
-    """给选手代码加上 CSP 文件输入输出包装，返回要提交给评测机的完整代码。
+def supports_source(ext: str) -> bool:
+    """是否支持编译该源码后缀。"""
+    return ext.lower() in SUPPORTED_EXTS
 
-    base 是题目的英文名：包装会把 stdin 落成 `<base>.in`、把 `<base>.out` 写回 stdout，
-    与选手 freopen("<base>.in", ...) 的写法完全对应。
+
+def csp_source_violation(source) -> str:
+    """检查常见官方禁用写法；忽略注释、普通字符串和原始字符串。
+
+    这不是完整 C++ 静态分析器，不能替代教师对规避规则代码的复核。
     """
-    shim = (SHIM_TEMPLATE
-            .replace("__IN__", f"{base}.in")
-            .replace("__OUT__", f"{base}.out"))
-    return shim + "\n" + source
-
-
-def can_wrap(ext: str) -> bool:
-    return ext.lower() in WRAPPABLE_EXTS
+    import re
+    text = source.decode("utf-8", "replace") if isinstance(source, bytes) else source
+    text = text.replace("\\\r\n", "").replace("\\\n", "")
+    literals = re.compile(r'(?:u8|u|U|L)?R"(?P<delim>[^ ()\\\t\r\n]{0,16})\(.*?\)(?P=delim)"'
+                          r'|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|//[^\n]*|/\*.*?\*/', re.S)
+    def mask(m):
+        if m.group(0).startswith('"') and re.search(r'\b_Pragma\s*\(\s*$', text[max(0, m.start()-100):m.start()]):
+            return m.group(0)
+        return " " + "\n" * m.group(0).count("\n")
+    code = literals.sub(mask, text)
+    forbidden = r'(?:GCC\s+(?:optimize|target|push_options|pop_options|reset_options)|clang\s+optimize)\b'
+    if re.search(r'^\s*#\s*pragma\s+' + forbidden, code, re.M) or re.search(r'\b_Pragma\s*\(\s*"\s*' + forbidden, code):
+        return "源代码改变编译器参数（pragma），违反 CSP 官方要求"
+    if re.search(r'\b(?:asm|__asm__|__asm)\s*(?:(?:volatile|__volatile__)\s*)?\(', code):
+        return "源代码使用内联汇编，违反 CSP 官方要求"
+    if re.search(r'\b__attribute__\s*\(\s*\(\s*(?:optimize|target)\b', code):
+        return "源代码通过属性改变编译器参数，违反 CSP 官方要求"
+    return ""
 
 
 def check_freopen(source: str, base: str) -> str:
     """检查选手代码里有没有正确的 freopen 调用，返回提示（没问题则返回空串）。
 
-    这只是**提示**：判分本身按包装后的行为走——真没写 freopen 的代码会因为
-    stdin 被读空而拿 0 分，与真实 CSP 一致。
+    这只是提示，不改写源码；fstream 等其它文件 I/O 同样可用。
     """
     import re
     pat = re.compile(r'freopen\s*\(\s*"([^"]+)"', re.I)
     found = pat.findall(source)
     want_in = f"{base}.in"
     if not found:
-        return "未检测到 freopen 调用：真实 CSP 中这种代码会读不到数据、直接 0 分。"
+        return "未检测到 freopen 调用；若使用 fstream 等文件 I/O 仍可正常评测，以实际生成的答案文件为准。"
     if want_in not in found:
         return (f"freopen 打开的文件是 {found[0]}，本题应该打开 {want_in}"
                 f"（题目英文名 {base}）——真实 CSP 中文件名写错同样拿 0 分。")

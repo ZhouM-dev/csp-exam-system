@@ -47,7 +47,7 @@ def problem_statement(pid: str, cache_dir: str = "", ttl: int = 0) -> str:
     调用姿势兼容而留的，本地实现用不上（没有"从别处取回来缓存"这回事了）。
     """
     pid = str(pid or "").strip()
-    if not pid:
+    if not judgelocal.valid_pid(pid):
         return ""
     path = os.path.join(store.DATA_DIR, "statements", f"{pid}.md")
     if not os.path.isfile(path):
@@ -89,7 +89,7 @@ def read_problem_case(pid: str, case_id) -> tuple:
     """
     pid = str(pid or "").strip()
     key = str(case_id or "").strip()
-    if not pid or not key:
+    if not judgelocal.valid_pid(pid) or not key or key in (".", "..") or "/" in key or "\\" in key:
         return "", ""
     d = judgelocal.cases_dir(pid)
     cand = [key]
@@ -106,17 +106,11 @@ def read_problem_case(pid: str, case_id) -> tuple:
             except OSError:
                 return ""
         return _read(ip), _read(os.path.join(d, f"{name}.out"))
-    # 兜底：按顺序数（第 N 个文件）
-    cases = judgelocal.cases_of(pid)
-    if key.isdigit() and 1 <= int(key) <= len(cases):
-        c = cases[int(key) - 1]
-        return ((c["in"] or b"").decode("utf-8", "replace"),
-                (c["out"] or b"").decode("utf-8", "replace") if c["out"] is not None else "")
     return "", ""
 
 
 def judge(pid: str, source: str, ext: str, *, code: str = "", full: int = 100,
-          io_mode: str = "auto") -> dict:
+          io_mode: str = "file") -> dict:
     """判一份代码（带时限/内存的自动取值）。「自己测试」和管理端都用这个。"""
     t_ms, mem_mb = judgelocal.limits_of(pid)
     return judgelocal.judge_source(pid, source, ext, code=code, full=full,
@@ -126,8 +120,14 @@ def judge(pid: str, source: str, ext: str, *, code: str = "", full: int = 100,
 def health() -> dict:
     """判题后端体检（页面/看板用）：沙箱在不在、题目数据齐不齐。"""
     g = judgelocal.gojudge.probe()
+    environment = {}
+    if g.get("ok"):
+        try:
+            environment = judgelocal.gojudge.ensure_ready()
+        except judgelocal.gojudge.GoJudgeError as e:
+            g.update(ok=False, error=str(e))
     pids = sorted(problem_pids())
     no_data = [p for p in pids if not judgelocal.cases_of(p)]
     return {"judge_ok": bool(g.get("ok")), "judge_version": g.get("version", ""),
             "judge_error": g.get("error", ""), "problems": len(pids),
-            "no_data": no_data}
+            "no_data": no_data, "environment": environment}
