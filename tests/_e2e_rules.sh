@@ -3,7 +3,7 @@
 #
 # 本轮改造后的口径（对照 整改清单.md 与 tasks/T-11）：
 #   * 三种赛制**统一交考号文件夹**（POST /upload）；`/submit` 代码提交页已删（302 回比赛页）
-#   * 考号格式 `<前缀>-<级别字母><5 位纯随机数>`（如 GD-S10029）——脚本里一律从本场名单里读，
+#   * 考号格式 `<前缀>-<级别字母><5 位纯随机数>`（如 GD-S48213）——脚本里一律从本场名单里读，
 #     **不写死具体号**（写死就变成"断言随机值"了）
 #   * 比赛新增 level / duration_min；**没有「反馈模式」开关了**——三种赛制一律赛中零反馈：
 #     判分照常跑（老师要看成绩），但老师在管理端点「公布成绩」之前，学生看不到任何判定与
@@ -23,6 +23,54 @@ PASS=0; FAIL=0
 pass() { echo "   [PASS] $1"; PASS=$((PASS+1)); }
 fail() { echo "   [FAIL] $1"; FAIL=$((FAIL+1)); }
 expect() { [ "$2" = "$3" ] && pass "$1（$2）" || fail "$1：实际 [$2] 期望 [$3]"; }
+
+# ---------------------------------------------------------------------------
+# **夹具守卫**（先跑，什么都不动就退出）
+#
+# 这一套是拿 c1/c2/c3 当**固定测试场**的：它会往这三场加题、拨公布/提交开关、
+# 并且**以名单里第一个学生的身份交一堆测试提交**（覆盖式计分那节要连交几十次）。
+# 一旦这三场被老师改成了真实比赛（改标题、换名单、配真题），跑它就会动到真数据 ——
+# 踩过：c2 被老师改成了「2026年10月4（南山S组第二次模拟）」，回归跑完那一场里
+# 第一个学生就留下了一串"全对 100 分"的测试记录。
+#
+# 所以先认标题：对不上就**停下来说清楚，什么都不动**（测试场要用就照夹具标题建）。
+# ---------------------------------------------------------------------------
+python3 - <<'PY' || { fail "夹具对不上（c1/c2/c3 不是测试场）——这一套会改开关、加题、以学生身份写提交记录，所以没跑"; \
+                      echo "   ⚠ 期望：c1=CSP / c2=OI / c3=IOI 三个测试场（见下面的对不上明细）"; \
+                      echo "     要用它测赛制，就照期望把这三场配成测试场（或改脚本里的 cid）。"; \
+                      exit 2; }
+from csp_exam.core import store
+# 赛制对不上 = 这一套的断言本身就没意义（它就是来验 CSP/OI/IOI 三种口径的）→ 硬拦
+WANT_RULE = {'c1': 'csp', 'c2': 'oi', 'c3': 'ioi'}
+# 标题对不上只是提醒（老师可能给测试场改了名），列出来让人自己判断
+WANT_TITLE = {'c1': 'CSP 模拟赛', 'c2': 'OI 模拟赛', 'c3': 'IOI 模拟赛（试）'}
+# 赛制要问 `list_contests()`：`exam.json` 里没有 rule 这个字段（它从比赛登记里取）
+rules = {}
+try:
+    for c in store.list_contests():
+        rules[str(c.get('id'))] = str(c.get('rule') or '').lower()
+except Exception as exc:                                     # noqa: BLE001
+    print("   读比赛列表失败：", exc)
+hard, soft = [], []
+for cid in ('c1', 'c2', 'c3'):
+    try:
+        e = store.load_exam(cid) or {}
+    except Exception as exc:                                 # noqa: BLE001
+        hard.append(f"{cid}（读不到：{exc}）")
+        continue
+    got_rule = rules.get(cid, '')
+    if got_rule != WANT_RULE[cid]:
+        hard.append(f"{cid} 的赛制是 {got_rule or '?'}，期望 {WANT_RULE[cid]}")
+    got_title = str(e.get('title') or '')
+    if got_title != WANT_TITLE[cid]:
+        soft.append(f"{cid} 标题「{got_title}」（测试场原叫「{WANT_TITLE[cid]}」）")
+for s in soft:
+    print("   ⚠", s, "—— 如果这是真实比赛，先别跑这一套")
+if hard:
+    print("   赛制对不上：", "；".join(hard))
+    raise SystemExit(1)
+print("   夹具自检通过：c1/c2/c3 的赛制与这一套的假设一致")
+PY
 
 kh_of() {  # 本场名单里的第一个考号（考号是随机的，从名单里取）
   python3 -c "
@@ -509,8 +557,8 @@ release c2 0
 
 echo
 echo "=== 4c. 管理端成绩总表：分数 + 判定 + 未交考生（用 c1 的迁移数据）==="
-# c1 的迁移数据正好覆盖三种情形：全对（张三）、部分正确/答案错误（学生17）、
-# 有名册记录但一题没交（王五 → 每题显示「未交」）
+# c1 的迁移数据正好覆盖三种情形：全对（学生01）、部分正确/答案错误（学生02）、
+# 有名册记录但一题没交（学生03 → 每题显示「未交」）
 curl -s -o $T/adm_scores.html "$BASE/admin/scores?key=$KEY&c=c1"
 python3 -c "
 import re

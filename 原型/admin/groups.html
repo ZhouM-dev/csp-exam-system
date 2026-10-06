@@ -14,7 +14,7 @@
 <p>分组名称 <input type="text" name="group_name" placeholder="例如 初三1班 / 集训A班"
    style="width:280px;display:inline-block"></p>
 <p style="margin-top:10px">学生姓名，每行一个（也可从 Excel 整列粘贴）：</p>
-<textarea name="names" placeholder="张三&#10;学生17&#10;王五"></textarea>
+<textarea name="names" placeholder="学生01&#10;学生02&#10;学生03"></textarea>
 <p style="margin-top:12px"><button type="submit">保存分组</button></p>
 <p class="muted">分组只是"一批学生"，可以反复用在不同考试里；每场考试的考号会自动随机生成。</p>
 </form>
@@ -23,20 +23,20 @@
 <h2>已有分组（1 个）</h2>
 
 <div class="card">
-<h2 style="margin-top:0">南山18:30
+<h2 style="margin-top:0">示例分组A
   <span class="muted">共 8 人</span></h2>
-<p class="muted">学生13、学生09、学生12、学生14、学生15、学生16、学生10、学生11</p>
+<p class="muted">学生56、学生15、学生52、学生55、学生04、学生54、学生53、学生13</p>
 <p class="muted">已用于：2026年9月26日南山CC</p>
 <form style="display:inline" onsubmit="return false">
   <details style="margin:8px 0"><summary>编辑名单</summary>
-    <textarea name="names" style="min-height:120px">学生13
-学生09
-学生12
-学生14
+    <textarea name="names" style="min-height:120px">学生56
 学生15
-学生16
-学生10
-学生11</textarea>
+学生52
+学生55
+学生04
+学生54
+学生53
+学生13</textarea>
     <p><button type="submit">保存名单</button></p>
   </details>
 </form>

@@ -109,7 +109,7 @@ def _rel(f) -> str:
 
 
 def _want_name(student_name) -> str:
-    """把学生姓名归一化：去空白；顺手容忍调用方传成「张三.txt」。"""
+    """把学生姓名归一化：去空白；顺手容忍调用方传成「学生01.txt」。"""
     want = str(student_name or "").strip()
     if want.lower().endswith(PERSON_FILE_EXT):
         want = want[:-len(PERSON_FILE_EXT)].strip()
@@ -118,7 +118,7 @@ def _want_name(student_name) -> str:
 
 def find_person_file(files: list, student_name: str, *,
                      strict: bool | None = None) -> str:
-    """在提交的文件里找**个人信息文件**（广东考区强制：文件名＝本人姓名，如 `学生13.txt`）。
+    """在提交的文件里找**个人信息文件**（广东考区强制：文件名＝本人姓名，如 `学生56.txt`）。
 
     返回命中的相对路径；没交返回空串。**这个文件不参与判分**，只用来提示"交没交"。
 

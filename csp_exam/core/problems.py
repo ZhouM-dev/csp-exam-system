@@ -794,6 +794,31 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
         return {"ok": False, "error": str(e), "pid": pid, "number": "", "name": "",
                 "code": "", "notes": notes, "cases": len(cases)}
 
+    # ---- 测试点内容：把**路径**换成**字节** ----
+    # 到这一步 `cases` 里的 `in`/`out` 还是**路径**（`pair_cases()` 与 `detect_bundle()`
+    # 给的都是"哪个文件"），判题引擎要的是"文件里是什么"。旧流程是在打包题目时做的
+    # 这一步（`build_package` 里 `f.write(files[case["in"]])`）；改成直接落盘那一次漏了，
+    # 于是 `store_problem` 把**路径字符串**写进了 `.in`/`.out` —— 学生交什么都判错，
+    # 而且页面上一切正常（踩过：老师新建的 T01/T02/SR01~03 全中招）。
+    # 少了内容就直接失败，别落盘一份坏的。
+    def _content(v):
+        """`cases` 里那一项是路径就查表换内容；已经是 bytes 就原样用。"""
+        if isinstance(v, bytes):
+            return v
+        return files.get(v) if isinstance(v, str) else None
+
+    missing = [str(c.get("name") or "?") for c in cases if _content(c.get("in")) is None]
+    if missing:
+        return {"ok": False, "pid": pid, "title": title, "number": "", "name": "",
+                "code": "", "cases": len(cases), "notes": notes, "problems": problems,
+                "error": f"测试点的输入内容没取到（{'、'.join(missing[:3])}）——"
+                         f"上传的文件可能没传全，重新选一次出题文件夹再建。"}
+    cases = [{
+        "name": c["name"],
+        "in": _content(c["in"]),                        # 路径 → 内容
+        "out": _content(c["out"]) if c.get("out") else None,
+    } for c in cases]
+
     # ---- 题目数据**落到本地题目库**（不再打包推给评测站）
     # 以前这一段的顺序是：先在导入目录拼出题目包 → `hydrooj cli problem import` 推上去
     # → 数据在评测站、我们只留一份题面缓存。判题换成 go-judge 之后反过来：

@@ -5,7 +5,7 @@
 用法：python3 selftest_roster.py
 
 > 考号口径在 v2 变过：以前是「前缀 + 4 位连续序号」的随机排列（GD-0001），
-> 现在是「前缀 + 级别字母 + 5 位纯随机数」（GD-S10029）。本文件的断言跟着改了，
+> 现在是「前缀 + 级别字母 + 5 位纯随机数」（GD-S48213）。本文件的断言跟着改了，
 > 并且**只断言规则、不断言具体号码**（号码是随机的，断言具体值没意义）。
 """
 
@@ -60,14 +60,14 @@ def main() -> int:
     store.DATA_DIR = tmp
     try:
         print("=== 1. 名单分组 ===")
-        g = store.create_group("初三1班", ["张三", "学生17", "王五"])
+        g = store.create_group("初三1班", ["学生01", "学生02", "学生03"])
         ok(g["gid"] == "g1" and len(g["students"]) == 3, "建分组", g["gid"])
         ok(store.get_group("g1")["name"] == "初三1班", "读分组")
-        g2 = store.create_group("集训A班", ["张三", "赵六"])       # 跨组重名允许
+        g2 = store.create_group("集训A班", ["学生01", "赵六"])       # 跨组重名允许
         ok(len(store.load_groups()) == 2, "两个分组", g2["gid"])
-        dup = store.clean_names(["张三", "张三", " 学生17 ", "", "学生17"])[1]
-        ok(sorted(dup) == ["张三", "学生17"], "组内重名会去重", dup)
-        store.update_group("g1", names=["张三", "学生17", "王五", "周七"])
+        dup = store.clean_names(["学生01", "学生01", " 学生02 ", "", "学生02"])[1]
+        ok(sorted(dup) == ["学生01", "学生02"], "组内重名会去重", dup)
+        store.update_group("g1", names=["学生01", "学生02", "学生03", "周七"])
         ok(len(store.get_group("g1")["students"]) == 4, "改名单")
         ok(store.delete_group("g2") is True, "删分组")
         ok(store.delete_group("g2") is False, "重复删返回 False")
@@ -172,7 +172,7 @@ def main() -> int:
             ok(r["GD-0001"]["uid"] == 7, "老 uid 保留")
             ok(store.split_kaohao("GD-0001") == ("", "", ""),
                "老格式考号被识别为老格式（迁移脚本据此改名）")
-            ok(store.split_kaohao("GD-S10029") == ("GD", "S", "48213"),
+            ok(store.split_kaohao("GD-S48213") == ("GD", "S", "48213"),
                "新格式考号能拆出前缀/级别/数字")
         finally:
             store.DATA_DIR = old_dir

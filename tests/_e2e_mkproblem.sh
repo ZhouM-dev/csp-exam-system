@@ -33,7 +33,7 @@ cleanup_data() {
 python3 - <<PY
 import os
 import shutil
-from csp_exam.core import store, importer as ip, problems as mp, hydro_client
+from csp_exam.core import store, importer as ip, problems as mp, judgelocal, localoj
 TEST_TITLES = ('加法测试',)          # 本脚本造的题的标题前缀（含「（坏标程）」「（第二份）」）
 for c in store.list_contests():
     if c['title'] in ('新题判分测试',):
@@ -43,14 +43,19 @@ for c in store.list_contests():
 e = store.load_exam('c1')
 e['problems'] = [p for p in e.get('problems', []) if p['pid'] != '$PID']
 store.save_exam('c1', e)
-# 站点上按标题找出本脚本造的题（含让位后的新标识）
+# **本机题库**里按标题找出本脚本造的题（含让位后的新标识）。
+# 老版这里走的是评测站（`hydro_client.list_problems()`）—— Hydro 停了以后那一步会抛异常，
+# 后面的清理全被跳过，测试题就留在题库/编号表里了（踩过）。现在正本就是本机。
 junk = []
-for it in hydro_client.list_problems():
+for it in localoj.list_problems():
     pid, title = str(it.get('pid') or ''), str(it.get('title') or '')
     if any(title.startswith(t) for t in TEST_TITLES) or pid in ('$PID', '${PID}b'):
         junk.append(pid)
 for pid in junk:
-    print('  删除题目', pid, ip.hydro_delete_problem(pid))
+    try:
+        print('  删除题目', pid, judgelocal.drop_problem_data(pid))
+    except Exception as exc:                                 # noqa: BLE001
+        print('  删除题目', pid, '失败：', exc)
 print('  站点上认出的测试题：', junk or '无')
 # 连题目编号登记表一起清掉（否则会留下指向已删题目的编号）
 codes = mp.load_codes()
@@ -71,7 +76,7 @@ for p in junk:
     if os.path.isfile(f):
         os.remove(f)
         print('  清掉题面缓存', p)
-store.save_catalog(hydro_client.list_problems())
+store.save_catalog(localoj.list_problems())
 print('  c1 题目：', [(p['no'], p['pid']) for p in store.load_exam('c1').get('problems', [])])
 print('  剩余比赛：', [c['title'] for c in store.list_contests()])
 PY
@@ -249,11 +254,11 @@ echo "  POST /admin/problem（同标识再建）-> HTTP $HTTP"
 [ "$HTTP" = "302" ] && pass "同标识再建成功（302 跳走；不再是「被拒绝 + 回显表单」）" \
   || fail "同标识再建还是被拒（HTTP $HTTP，应该 302）"
 python3 - <<PY
-from csp_exam.core import hydro_client, problems as mp
-live = {str(i['pid']): i['title'] for i in hydro_client.list_problems()}
+from csp_exam.core import localoj, problems as mp
+live = {str(i['pid']): i['title'] for i in localoj.list_problems()}
 code1 = mp.code_of_pid('$PID')
 # 第二份落在哪个标识上由 free_pid 决定（G01 → G01b 这种字母后缀），所以按标题找它；
-# 找不到、或者标识是 #N，都说明"让位"没落成评测站认的形式（#N 是评测站自己偷偷编的）
+# 找不到、或者标识是 #N，都说明"让位"没落成题库认的形式（#N 是老评测站自己偷偷编的）
 second = [p for p, t in live.items() if t == '加法测试（第二份）']
 print('  站上 $PID → %r' % live.get('$PID'))
 print('  第二份 → 标识 %s' % (second or '没找到'))
@@ -271,9 +276,9 @@ for okv, label in checks:
 PY
 
 echo
-echo "=== 3c. 改题面：已有题目不用删也能改（评测站 + 本站缓存一起更新）==="
-# 题面的**真身**在评测站（题目文档的 content 字段），本站 data/statements/<pid>.md 只是缓存。
-# 所以保存必须两处都写：只写缓存 → 6 小时后被冲掉；只写评测站 → 学生立刻看到的还是旧的。
+echo "=== 3c. 改题面：已有题目不用删也能改（题面文件就是真身）==="
+# 题面的**真身就是本机 `data/statements/<pid>.md`**（Hydro 停用后没有"从别处取回来缓存"这回事）。
+# 保存就是写这个文件；写完学生端立刻是新的。
 NEWSTMT="## 改过的题面（验收）
 
 这是一次「改题面」验收，题目 $PID。
@@ -284,44 +289,46 @@ curl -s -o /dev/null -w '  POST /admin/statement -> HTTP %{http_code}\n' --max-t
 python3 - <<PY
 import io
 import os
-from csp_exam.core import hydro_client as hydro, store
+from csp_exam.core import localoj, store
 pid = '$PID'
-live = hydro.problem_statement(pid, cache_dir='', ttl=0)          # 评测站那份（ttl=0 强取）
+live = localoj.problem_statement(pid)                              # 真身（题面文件）
 cache = os.path.join(store.DATA_DIR, 'statements', pid + '.md')
 cached = io.open(cache, encoding='utf-8').read() if os.path.isfile(cache) else ''
-print('  评测站那份 %d 字 / 本站缓存 %d 字' % (len(live), len(cached)))
+print('  题面文件 %d 字（读接口拿到 %d 字）' % (len(cached), len(live)))
 checks = [
-    ('ZM-STATEMENT-OK' in live, '评测站上的题面已更新（真身写了）'),
-    ('ZM-STATEMENT-OK' in cached, '本站缓存也刷了（不刷的话 6 小时后会被冲掉）'),
-    ('改过的题面（验收）' in live and '改过的题面（验收）' in cached, '两边是同一份新题面'),
+    ('ZM-STATEMENT-OK' in live, '题面文件里是新题面（真身写了）'),
+    ('ZM-STATEMENT-OK' in cached, '读题面的接口拿到的也是新的（学生端看的就是它）'),
+    ('改过的题面（验收）' in live and '改过的题面（验收）' in cached, '两处是同一份新题面'),
 ]
 for okv, label in checks:
     print('   [%s] %s' % ('PASS' if okv else 'FAIL', label))
 PY
 
 echo
-echo "=== 4. 题目确实进了站点（题库缓存也已刷新）==="
+echo "=== 4. 题目确实进了题库（缓存也刷新了）==="
 python3 - <<PY
 import os
-from csp_exam.core import store, hydro_client, problems as mp
+from csp_exam.core import store, localoj, problems as mp
 items = {str(i['pid']): i['title'] for i in (store.load_catalog().get('items') or [])}
-live = {str(i['pid']): i['title'] for i in hydro_client.list_problems()}
+live = {str(i['pid']): i['title'] for i in localoj.list_problems()}
 code = mp.code_of_pid('$PID')
 checks = [
     ('$PID' in items, '题库缓存里有 $PID（%s）' % items.get('$PID', '')),
-    ('$PID' in live, '站点题库里有 $PID（%s）' % live.get('$PID', '')),
+    ('$PID' in live, '题库里有 $PID（%s）' % live.get('$PID', '')),
     (bool(code), '编号登记表里已分配题目编号（%s）' % (code or '没分配')),
 ]
 for okv, label in checks:
     print('   [%s] %s' % ('PASS' if okv else 'FAIL', label))
-# 题目包（题面/标程/testdata）确实落到了评测站的导入目录
-root = '/root/hydro/data/backend/import/_mk/$PID'
+# 题目数据（测试点 + 题面）确实落在了本机题库目录里
+root = os.path.join('data', 'problems', '$PID')
 files = [os.path.relpath(os.path.join(dp, f), root)
          for dp, _dn, fn in os.walk(root) for f in fn]
-print('   [%s] 题目包已落盘（%d 个文件：%s）'
+stmt = os.path.join('data', 'statements', '$PID.md')
+print('   [%s] 题目数据已落盘（%d 个文件：%s）'
       % ('PASS' if len(files) >= 4 else 'FAIL', len(files), '、'.join(sorted(files)[:6])))
+print('   [%s] 题面文件在（%s）' % ('PASS' if os.path.isfile(stmt) else 'FAIL', stmt))
 if not files:
-    print('     （%s 是空的；若导入目录改过位置，这里只是提示，不算失败）' % root)
+    print('     （%s 是空的；若题库目录改过位置，这里只是提示）' % root)
 PY
 
 echo
@@ -424,18 +431,18 @@ raise SystemExit(0 if ('已删除题目' in msg and '题面' in msg) else 1)
 PY
 [ $? = 0 ] && pass "假删除成功，提示说明题面/记录都还在" || fail "删除没成功"
 python3 -c "
-from csp_exam.core import problems as mp
+from csp_exam.core import problems as mp, localoj
 from csp_exam.web.admin_pages import load_problem_info
 pid = '${PID}b'
 codes = mp.load_codes(); info = load_problem_info()
 rec = info.get(pid) or {}
-ok = (pid in codes                        # 编号登记保留
-      and rec.get('deleted') == 1         # 打了假删除记号
-      and pid in mp.ip.hydro_problem_pids())   # 评测站上的题目也保留
+ok = (pid in codes                           # 编号登记保留
+      and rec.get('deleted') == 1            # 打了假删除记号
+      and pid in localoj.problem_pids())     # 本机题目数据（测试点 + 题面）也保留
 print('  编号登记在：', pid in codes, '／假删除记号：', rec.get('deleted'),
-      '／评测站上在：', pid in mp.ip.hydro_problem_pids())
+      '／本机题目数据在：', pid in localoj.problem_pids())
 raise SystemExit(0 if ok else 1)
-" && pass "假删除不真删：编号/记号和评测站题目都留着（题面与提交记录还能看）" \
+" && pass "假删除不真删：编号/记号和本机题目数据都留着（题面与提交记录还能看）" \
   || fail "假删除把东西真删了"
 curl -s "$BASE/admin/problems?key=$KEY" -o $T/pl_del.html
 # 假删除之后**系统不再认这道题**：配题候选（/api/problems）里不该再有它。
@@ -451,9 +458,11 @@ raise SystemExit(1 if '${PID}b' in items else 0)
 python3 -c "
 h = open('$T/pl_del.html', encoding='utf-8', errors='replace').read()
 main, sep, tail = h.partition('已删除的题目')
-print('  有已删除块：', bool(sep), '／主表格里还有它：', 'pid\" value=\"${PID}b\"' in main,
+# 「在不在主表格」认 `data-test=`（在用的行才有「自己测试」按钮；
+# 每行那个删/恢复按钮都是 `data-*` 上的 pid，已删除的行只有 data-restore/data-purge）
+print('  有已删除块：', bool(sep), '／主表格里还有它：', 'data-test=\"${PID}b\"' in main,
       '／已删除块里有它：', '${PID}b' in tail)
-raise SystemExit(0 if (sep and 'pid\" value=\"${PID}b\"' not in main and '${PID}b' in tail) else 1)
+raise SystemExit(0 if (sep and 'data-test=\"${PID}b\"' not in main and '${PID}b' in tail) else 1)
 " && pass "列表页把它收进「已删除的题目」里，不再占着主表格" || fail "列表页没收干净"
 curl -s "$BASE/admin/scan?key=$KEY" --max-time 60 \
   --data-urlencode "render=1" --data-urlencode "pid=${PID}b" -o $T/stmt_del.json
@@ -474,7 +483,7 @@ python3 -c "
 import json
 h = open('$T/pl_res.html', encoding='utf-8', errors='replace').read()
 main, _, _ = h.partition('已删除的题目')
-in_main = 'pid\" value=\"${PID}b\"' in main
+in_main = 'data-test=\"${PID}b\"' in main
 d = json.load(open('$T/api_res.json', encoding='utf-8'))
 in_api = '${PID}b' in [i['pid'] for i in d.get('items') or []]
 print('  回到主表格：', in_main, '／回到配题候选：', in_api)
@@ -494,12 +503,12 @@ raise SystemExit(0 if '已彻底删除' in msg else 1)
 PY
 [ $? = 0 ] && pass "「彻底删除」能真删掉" || fail "彻底删除没成功"
 python3 -c "
-from csp_exam.core import problems as mp
+from csp_exam.core import problems as mp, localoj
 from csp_exam.web.admin_pages import load_problem_info
 pid = '${PID}b'
 codes = mp.load_codes(); info = load_problem_info()
 left = [w for w, has in (('编号登记', pid in codes), ('题库元信息', pid in info),
-                         ('评测站题目', pid in mp.ip.hydro_problem_pids())) if has]
+                         ('本机题目数据', pid in localoj.problem_pids())) if has]
 print('  彻底删完还剩：', left or '全都清掉了')
 raise SystemExit(1 if left else 0)
 " && pass "彻底删除后各处都不留残留" || fail "彻底删了但留了残留"
@@ -510,9 +519,10 @@ cleanup_data
 rm -rf $T/mkprob $T/mksub
 python3 - <<PY
 import os
-from csp_exam.core import store, importer as ip, problems as mp
+from csp_exam.core import store, localoj, problems as mp
 left = [c['title'] for c in store.list_contests() if c['title'] == '新题判分测试']
-left_p = [p for p in ('$PID', '${PID}b', '$PID-2') if p in ip.hydro_problem_pids()]
+left_p = [p for p in ('$PID', '${PID}b', '$PID-2') if p in localoj.problem_pids()]
+left_code = [p for p in ('$PID', '${PID}b', '$PID-2') if mp.code_of_pid(p)]
 left_code = [p for p in ('$PID', '${PID}b', '$PID-2') if mp.code_of_pid(p)]
 okv = not (left or left_p or left_code)
 print('   [%s] 清理干净（残留比赛 %s / 题目 %s / 编号 %s）'

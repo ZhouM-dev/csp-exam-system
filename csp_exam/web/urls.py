@@ -36,6 +36,23 @@ def statement_url(key: str, pid: str = "", msg: str = "") -> str:
     return "/admin/statement" + (("?" + "&".join(parts)) if parts else "")
 
 
+def problem_detail_url(key: str, pid: str = "", msg: str = "") -> str:
+    """「题目详情」页（`/admin/problem-detail`）的地址：密钥 + 题库标识 + 提示语。
+
+    这一页是**看题 + 改题**的整页视图（左边 Markdown 原文、右边学生看到的成品），
+    列表页的「查看题面」和保存后的回跳都走它。和 `statement_url` 一样，
+    别在页面里手拼查询串（两个问号的坑）。
+    """
+    parts = []
+    if key:
+        parts.append("key=" + urllib.parse.quote(key))
+    if pid:
+        parts.append("pid=" + urllib.parse.quote(pid))
+    if msg:
+        parts.append("m=" + urllib.parse.quote(msg))
+    return "/admin/problem-detail" + (("?" + "&".join(parts)) if parts else "")
+
+
 def admin_url(key: str, cid: str = "", msg: str = "", path: str = "/admin") -> str:
     """管理端跳转用的地址。踩过：直接 "/admin" + cid_query(...) + "?m=" 会拼出两个问号，
     结果 c 变成 "c2?m=..."，消息也丢了。"""

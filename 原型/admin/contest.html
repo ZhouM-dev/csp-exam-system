@@ -73,20 +73,20 @@
 <div class="row">
   <select name="gid" style="width:280px">
     <option value="">— 不用分组，用下面的粘贴名单 —</option>
-    <option value="g1">南山18:30（8 人）</option>
+    <option value="g1">示例分组A（8 人）</option>
   </select>
   <span>考号前缀 <input type="text" name="prefix"
      value="GD"
      style="width:80px;display:inline-block"></span>
 </div>
 <p style="margin-top:12px"><b>② 或者临时粘贴名单</b>（每行一个姓名，也可从 Excel 整列粘贴）：</p>
-<textarea name="names" placeholder="张三&#10;学生17&#10;王五" style="min-height:110px"></textarea>
+<textarea name="names" placeholder="学生01&#10;学生02&#10;学生03" style="min-height:110px"></textarea>
 <div class="row" style="margin-top:12px">
   <label><input type="radio" name="mode" value="append" checked style="width:auto"> 追加到本场（已有学生保持原考号）</label>
   <label><input type="radio" name="mode" value="replace" style="width:auto"> 重建本场名单（清空后全部重发考号）</label>
 </div>
 <p style="margin-top:12px"><button type="submit">导入并生成考号</button></p>
-<p class="muted">考号的数字部分是<b>纯随机数</b>（5 位，如 <code>GD-S10029</code>），不是从 1 开始顺着排的：
+<p class="muted">考号的数字部分是<b>纯随机数</b>（5 位，如 <code>GD-S48213</code>），不是从 1 开始顺着排的：
   和学生姓名、名单顺序、机位、上一场都毫无关系，学生猜不到别人的号；同一场里不会重号，不同场次各发各的。
 导入后会在评测站为每个考号建好账号（学生本人不需要注册登录）。</p>
 </form>
@@ -96,14 +96,14 @@
 <h2 style="margin-top:0">本场名单（8 人）<span class="muted"> 考号纯随机，发下去之前建议点开「考号表」核对</span></h2>
 <table>
 <tr><th>考号</th><th>姓名</th><th>评测站密码</th><th>账号</th><th>提交</th></tr>
-<tr><td>GD-S10025</td><td>学生09</td><td class="muted">hPXAHOJ3</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10026</td><td>学生10</td><td class="muted">PflVbFGH</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10027</td><td>学生11</td><td class="muted">ul44nRgb</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10028</td><td>学生12</td><td class="muted">6gr9YNea</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10029</td><td>学生13</td><td class="muted">示例密码</td><td>已建</td><td>已提交</td></tr>
-<tr><td>GD-S10030</td><td>学生14</td><td class="muted">WzXbPrUS</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10031</td><td>学生15</td><td class="muted">B1Ay4LW6</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10032</td><td>学生16</td><td class="muted">nYzDHRua</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S07915</td><td>学生15</td><td class="muted">示例密码</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S14576</td><td>学生53</td><td class="muted">示例密码</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S25064</td><td>学生13</td><td class="muted">ul44nRgb</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S36280</td><td>学生52</td><td class="muted">6gr9YNea</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S48213</td><td>学生56</td><td class="muted">示例密码</td><td>已建</td><td>已提交</td></tr>
+<tr><td>GD-S60932</td><td>学生55</td><td class="muted">示例密码</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S73891</td><td>学生04</td><td class="muted">示例密码</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S91427</td><td>学生54</td><td class="muted">示例密码</td><td>未建</td><td>—</td></tr>
 </table>
 <form style="margin-top:10px"><button type="button" class="btn-gray">提前建好本场 7 个账号</button><span class="muted"> 不点也没关系：学生第一次提交时会自动建（每个账号要启动一次评测站进程，所以后台串行创建，慢一点但不会拖垮服务器）</span></form>
 </div>
@@ -168,14 +168,14 @@
 <div class="card" style="overflow:auto">
 <table>
 <tr><th>考号</th><th>姓名</th><th>评测站密码</th><th>站点账号</th><th>提交状态</th></tr>
-<tr><td>GD-S10025</td><td>学生09</td><td class="muted">hPXAHOJ3</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10026</td><td>学生10</td><td class="muted">PflVbFGH</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10027</td><td>学生11</td><td class="muted">ul44nRgb</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10028</td><td>学生12</td><td class="muted">6gr9YNea</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10029</td><td>学生13</td><td class="muted">示例密码</td><td>已建</td><td>已提交</td></tr>
-<tr><td>GD-S10030</td><td>学生14</td><td class="muted">WzXbPrUS</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10031</td><td>学生15</td><td class="muted">B1Ay4LW6</td><td>未建</td><td>—</td></tr>
-<tr><td>GD-S10032</td><td>学生16</td><td class="muted">nYzDHRua</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S07915</td><td>学生15</td><td class="muted">示例密码</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S14576</td><td>学生53</td><td class="muted">示例密码</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S25064</td><td>学生13</td><td class="muted">ul44nRgb</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S36280</td><td>学生52</td><td class="muted">6gr9YNea</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S48213</td><td>学生56</td><td class="muted">示例密码</td><td>已建</td><td>已提交</td></tr>
+<tr><td>GD-S60932</td><td>学生55</td><td class="muted">示例密码</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S73891</td><td>学生04</td><td class="muted">示例密码</td><td>未建</td><td>—</td></tr>
+<tr><td>GD-S91427</td><td>学生54</td><td class="muted">示例密码</td><td>未建</td><td>—</td></tr>
 </table>
 </div>
 

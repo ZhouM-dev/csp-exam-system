@@ -18,11 +18,11 @@ echo "=== 准备：造一个出题工程文件夹 ==="
 # 上次跑到一半失败会留下测试比赛 / 测试题目 / 大样例存档 —— 先清掉，别越堆越多
 python3 - <<PY
 import shutil
-from csp_exam.core import store, importer as ip, problems as mp
+from csp_exam.core import store, importer as ip, problems as mp, judgelocal
 for c in [x for x in store.list_contests() if x.get('title') == '大样例验收']:
     store.delete_contest(c['id'])
     print('  清掉上次残留的测试比赛', c['id'])
-print('  清掉上次残留的测试题目 $PID：', ip.hydro_delete_problem('$PID'))
+print('  清掉上次残留的测试题目 $PID：', judgelocal.drop_problem_data('$PID'))
 shutil.rmtree(mp._samples_root('$PID'), ignore_errors=True)
 # 题目编号登记 / 题库元信息也要清：本轮建题不再支持覆盖，而这两样按 pid 记着，
 # 上一轮留下的记录会让「题目列表」多出一行指向已删题目的空壳。
@@ -110,28 +110,31 @@ for okv, label in checks:
 PY
 
 echo
-echo "=== 2. 站点上确实只评测 2 个点（样例不算）==="
+echo "=== 2. 本机题库里确实只评测 2 个点（样例不算）==="
 python3 - <<PY
-import subprocess, json
-from csp_exam.core import store
+import os
+from csp_exam.core import store, judgelocal
 d = [p for p in store.load_catalog().get('items') or [] if str(p['pid']) == '$PID']
 print('  题库里有这道题：', d)
-js = 'const d=db.document.findOne({docType:10,pid:"$PID"},{docId:1,data:1,content:1}); '\\
-     'print(JSON.stringify({n:(d.data||[]).length, names:(d.data||[]).map(x=>x.name), content:(d.content||"").slice(0,40)}))'
-p = subprocess.run(["docker","compose","-f","/root/hydro/docker-compose.yml","exec","-T","oj-mongo",
-                    "mongosh","hydro","--quiet","--eval",js], cwd="/root/hydro",
-                   capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
-line = [l for l in (p.stdout or "").splitlines() if l.startswith('{')]
-info = json.loads(line[0]) if line else {}
-print('  站点上的数据文件：', info.get('names'))
-print('  题面开头：', info.get('content'))
-names = info.get('names') or []
+d2 = judgelocal.cases_dir('$PID')
+names = sorted(os.listdir(d2)) if os.path.isdir(d2) else []
+print('  本机测试点目录：', d2)
+print('  测试点文件：', names)
+stmt_path = os.path.join('data', 'statements', '$PID.md')
+stmt = open(stmt_path, encoding='utf-8').read() if os.path.isfile(stmt_path) else ''
+print('  题面开头：', stmt[:40].replace(chr(10), ' '))
+first_in = os.path.join(d2, '1.in')
+head = open(first_in, 'rb').read(6) if os.path.isfile(first_in) else b''
 checks = [
     (all(n in names for n in ('1.in','1.out','2.in','2.out'))
      and not any('大样例' in n for n in names)
      and not any(n.startswith('样例') for n in names),
      '评测数据只有 1..2，样例/大样例都没混进来'),
-    ('大样例测试' in (info.get('content') or ''), '题面用了文件夹里的 题目.md'),
+    ('大样例测试' in stmt, '题面用了文件夹里的 题目.md'),
+    # 内容必须是**字节**、不能是文件名/路径（踩过：写进去的是路径字符串，
+    # 学生交什么都判错，而页面上一切正常）
+    (head not in (b'1.in', b'1.in\r\n', b'') and b'/' not in head,
+     '测试点里写的是内容（不是文件名/路径）'),
 ]
 for okv, label in checks:
     print('   [%s] %s' % ('PASS' if okv else 'FAIL', label))
@@ -196,10 +199,10 @@ echo "=== 5. 清理 ==="
 python3 - <<PY
 import os
 import shutil
-from csp_exam.core import store, importer as ip, problems as mp, hydro_client as hydro
+from csp_exam.core import store, importer as ip, problems as mp, judgelocal, localoj
 shutil.rmtree(os.path.join('data', 'contests', '$CID'), ignore_errors=True)
 store.delete_contest('$CID')
-print('  删除题目 $PID：', ip.hydro_delete_problem('$PID'))
+print('  删除题目 $PID：', judgelocal.drop_problem_data('$PID'))
 shutil.rmtree(mp._samples_root('$PID'), ignore_errors=True)
 # 题目编号登记 / 题库元信息一起清（否则「题目列表」里留一行指向已删题目的「大样例测试」）
 codes = mp.load_codes()
@@ -210,7 +213,7 @@ info = load_problem_info()
 gone2 = [p for p in ('$PID',) if info.pop(p, None)]
 save_problem_info(info)
 print('  清掉编号登记/元信息：', (gone or []) + (gone2 or []) or '无')
-store.save_catalog(hydro.list_problems())
+store.save_catalog(localoj.list_problems())
 print('  剩余比赛：', [c['title'] for c in store.list_contests()])
 PY
 [ $? = 0 ] || fail "清理脚本出错（见上面的 Traceback）"
@@ -219,10 +222,10 @@ PY
 # 一场场地堆在老师的比赛列表/题库里，而验收还是"全绿"。
 python3 - <<PY
 import os
-from csp_exam.core import store, importer as ip, problems as mp
+from csp_exam.core import store, localoj, problems as mp
 left_c = [c['id'] for c in store.list_contests() if c['title'] == '大样例验收']
 left_dir = os.path.isdir(os.path.join('data', 'contests', '$CID'))
-left_p = '$PID' in ip.hydro_problem_pids()
+left_p = '$PID' in localoj.problem_pids()
 left_s = os.path.isdir(os.path.join('data', 'samples', '$PID'))
 left_code = mp.code_of_pid('$PID')
 okv = not (left_c or left_dir or left_p or left_s or left_code)

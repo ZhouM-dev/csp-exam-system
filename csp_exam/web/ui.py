@@ -335,6 +335,79 @@ tr.tp-group .tp-sub-score { float: right; font-weight: 600; }
 .tp-card h3 { margin: 0 0 8px; font-size: 14.5px; }
 .tp-fail { background: #fef2f2; }
 .tp-pass { background: #f0fdf4; }
+
+/* ============================================================
+   题目列表：操作列排一行
+   （列宽在页面里按百分比给足；这里只管「不许折行」——
+    删掉一个按钮后剩三个，一行放得下，折行反而让行高忽高忽低不好点）
+   ============================================================ */
+.prob-ops { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; }
+.prob-ops form { display: inline; margin: 0; }
+.prob-ops .btn { white-space: nowrap; }
+/* 点了删除、等服务端回话的那一下：先把这行灰掉，别让人以为没点上 */
+tr.row-busy { opacity: .4; pointer-events: none; }
+#prob-flash:empty { display: none; }
+#prob-flash { margin: 10px 0; }
+
+/* ============================================================
+   题目详情页：左边改（Markdown 原文），右边看（学生视角的成品）
+   ============================================================ */
+.pd-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 10px;
+}
+.pd-bar .muted { font-size: 13px; }
+.pd-bar .btn.on { background: #2563eb; border-color: #2563eb; color: #fff; }
+.pd-wrap { display: flex; gap: 14px; align-items: flex-start; }
+.pd-wrap > * { min-width: 0; }
+.pd-left { flex: 1 1 50%; }
+.pd-right { flex: 1 1 50%; position: sticky; top: 8px; }
+.pd-wrap[data-mode="left"] .pd-right { display: none; }
+.pd-wrap[data-mode="right"] .pd-left { display: none; }
+.pd-wrap[data-mode="left"] .pd-left, .pd-wrap[data-mode="right"] .pd-right { flex: 1 1 100%; }
+.pd-wrap .card { margin-top: 0; }
+.pd-left .card + .card { margin-top: 12px; }
+#pd-src { width: 100%; min-height: 54vh; }
+.pd-right .card { max-height: 84vh; overflow: auto; }
+.pd-right .stmt { border: 0; padding: 0; }
+.pd-note { font-size: 13px; margin: 6px 0 0; }
+/* ============================================================
+   多选下拉（比赛列表的「按名单分组分类」用）
+   没 JS 时面板是展开的（退化成普通勾选框，照样能用）；有 JS 才收成下拉。
+   ============================================================ */
+@media (max-width: 980px) {
+  .pd-wrap { flex-direction: column; }
+  .pd-left, .pd-right { flex: 1 1 auto; width: 100%; }
+  .pd-right { position: static; }
+}
+
+/* ============================================================
+   多选下拉（比赛列表的「按名单分组分类」用）
+   没 JS 时面板是展开的（退化成普通勾选框，照样能用）；有 JS 才收成下拉。
+   ============================================================ */
+.contest-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.contest-list-note { flex: 1 1 260px; }
+.contest-pagination { margin: 16px 0; }
+.gmul { position: relative; display: inline-block; max-width: 100%; }
+#gmul-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gmul-panel {
+  position: absolute; z-index: 60; top: calc(100% + 6px); left: 0;
+  width: 480px; max-width: calc(100vw - 72px);
+  max-height: min(480px, 70vh); overflow-y: auto;
+  background: #fff; border: 1px solid #d5dbe1; border-radius: 9px;
+  padding: 14px 16px;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, .14);
+  white-space: normal; overflow-wrap: anywhere;
+}
+.gmul-panel[hidden] { display: none; }
+.gmul-options { max-height: 260px; overflow-y: auto; margin: 10px 0; }
+.gmul-panel label { display: flex; align-items: flex-start; gap: 6px; font-weight: 400; margin: 8px 0; white-space: normal; }
+.gmul-panel input[type=checkbox] { flex: 0 0 auto; margin-top: 6px; }
+.gmul-name { flex: 1; min-width: 0; }
+.gmul-panel label .muted { flex: 0 0 auto; }
+.gmul-panel .gmul-foot { margin: 10px 0 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* 题面里的显示公式块（`$$ … $$`）：整块一个元素，公式太长时横向滚动，别把卡片撑破 */
+.math-block { overflow-x: auto; overflow-y: hidden; }
 """
 
 

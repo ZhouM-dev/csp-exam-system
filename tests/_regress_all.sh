@@ -10,7 +10,7 @@
 set -u
 cd /root/csp-exam || exit 1
 
-ALL="_e2e_rules _e2e_new _e2e_roster _e2e_tree _e2e_mkproblem _e2e_folder _e2e_httpimport"
+ALL="_e2e_rules _e2e_new _e2e_roster _e2e_tree _e2e_mkproblem _e2e_problemdetail _e2e_reupload _e2e_folder _e2e_httpimport"
 QUICK=0
 PICKED=""
 for a in "$@"; do

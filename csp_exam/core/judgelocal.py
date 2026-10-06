@@ -149,10 +149,20 @@ def store_problem(pid: str, cases: list[dict], statement: str = "") -> dict:
 
     `cases` 就是 `create_problem` 里配好的那批：`[{"name","in","out"}]`（`in`/`out` 是 bytes）。
     返回 `{"cases": n, "bytes": n, "dir": …}`。
+
+    `in`/`out` **必须是 bytes**：以前这里对 str 做了个 `str(ib).encode()` 的"兜底"，
+    结果把上游漏掉的一步（路径→内容）悄悄写成了路径字符串，题目建出来页面上一切正常、
+    学生交什么都判错（踩过：老师新建的几道题全中招）。现在直接报错，不再咽下去。
     """
     import shutil
     pid = str(pid or "").strip()
     d = cases_dir(pid)
+    for i, c in enumerate(cases, 1):
+        for k in ("in", "out"):
+            v = c.get(k)
+            if v is not None and not isinstance(v, bytes):
+                raise OSError(f"测试点 {c.get('name') or i} 的 {k} 不是 bytes"
+                              f"（拿到 {type(v).__name__}）—— 上层忘了把路径换成内容？")
     # **先清空**：重传/重建同一道题时，上一版残留的测试点（比如旧的 21.out）必须一起走，
     # 否则新数据是 20 个点、旧的第 21 个还躺在目录里，判题时会多判一个点（分数就不对了）
     shutil.rmtree(d, ignore_errors=True)
@@ -163,12 +173,11 @@ def store_problem(pid: str, cases: list[dict], statement: str = "") -> dict:
         ib = c.get("in") or b""
         ob = c.get("out")
         with open(os.path.join(d, f"{name}.in"), "wb") as f:
-            f.write(ib if isinstance(ib, bytes) else str(ib).encode("utf-8"))
+            f.write(ib)
         total += len(ib)
         with open(os.path.join(d, f"{name}.out"), "wb") as f:
-            data = ob if isinstance(ob, bytes) else (str(ob).encode("utf-8") if ob else b"")
-            f.write(data)
-        total += len(data)
+            f.write(ob or b"")
+        total += len(ob or b"")
     if statement and statement.strip():
         from . import store as _store
         sp = os.path.join(_store.DATA_DIR, "statements", f"{pid}.md")

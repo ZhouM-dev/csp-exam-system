@@ -11,7 +11,7 @@
         results.json             # 本场成绩：{考号: {problems, total, ...}}
         uploads/<考号>/          # 收到的代码（CSP 是文件夹结构，OI/IOI 是每题一个文件）
 
-考号是**按场次随机生成**的，格式 `<前缀>-<级别><5 位随机数>`，例如 `GD-S10029`：
+考号是**按场次随机生成**的，格式 `<前缀>-<级别><5 位随机数>`，例如 `GD-S48213`：
 
 * 数字部分是**纯随机数**（00001~99999），不是从 1 开始的排列 —— 与学生姓名、名单顺序、
   机位、上一场都无关，学生猜不到别人的号；
@@ -47,7 +47,7 @@ from ..config import DATA_DIR          # 数据目录由 config 统一指定（�
 _LOCK = threading.RLock()
 
 DEFAULT_PREFIX = "GD"     # 考号前缀（省份代码风格）
-DEFAULT_WIDTH = 5         # 随机数位数：GD-S10029
+DEFAULT_WIDTH = 5         # 随机数位数：GD-S48213
 DEFAULT_LEVEL = "S"       # 默认级别：S 提高级 / J 入门级
 _RNG = random.SystemRandom()      # 考号随机生成用（不可预测，避免学生猜别人考号）
 
@@ -158,7 +158,7 @@ def load_students() -> dict:
 
 def make_kaohao(num: int, prefix: str = DEFAULT_PREFIX, level: str = DEFAULT_LEVEL,
                 width: int = DEFAULT_WIDTH) -> str:
-    """拼一个考号：<前缀>-<级别><随机数>，如 GD-S10029、GD-J07915。"""
+    """拼一个考号：<前缀>-<级别><随机数>，如 GD-S48213、GD-J07915。"""
     lv = (level or DEFAULT_LEVEL).upper()
     if lv not in LEVEL_MINUTES:
         lv = DEFAULT_LEVEL

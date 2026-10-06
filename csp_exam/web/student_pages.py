@@ -124,11 +124,11 @@ class StudentPages:
 {head}
 <form method="post" action="/enter">
 {f'<input type="hidden" name="c" value="{html.escape(cid)}">' if cid else ''}
-<input type="text" name="kaohao" placeholder="考号（如 GD-S10029）" autofocus
+<input type="text" name="kaohao" placeholder="考号（如 GD-S48213）" autofocus
        style="font-size:18px;letter-spacing:1px">
 <p style="margin-top:14px"><button type="submit">进入考试</button></p>
 </form>
-<p class="muted">考号形如 <code>GD-S10029</code>：中间的短横是 <code>-</code>（不是 <code>_</code>），
+<p class="muted">考号形如 <code>GD-S48213</code>：中间的短横是 <code>-</code>（不是 <code>_</code>），
 字母要大写；数字是纯随机分配的，不用记规律。</p>
 </div>
 <p class="muted"><a href="/admin">管理端</a></p>"""
@@ -527,7 +527,7 @@ class StudentPages:
         加原文链接，不会 500。
 
         通告之后附「本场信息」：考号、目录树、个人信息文件名、提交方式。这几项是
-        **本平台按这一位学生算出来的**，通告里只有 GD-S00001／张三 那种通用示例，
+        **本平台按这一位学生算出来的**，通告里只有 GD-S00001／学生01 那种通用示例，
         所以不能拿通告顶掉。通告本身讲清楚的（目录结构、命名红线、输入输出、
         NOI Linux 编译坑、考场纪律）页面不再重复。
 

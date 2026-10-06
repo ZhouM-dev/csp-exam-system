@@ -14,7 +14,7 @@
     # 2) 确认没问题再写回成绩
     sudo env PYTHONPATH=/root/csp-exam python3 tests/_rejudge.py --today --apply
 
-筛选用 `--today`（今天交的）/ `--cid c7` / `--kaohao GD-J02153` / `--all`；
+筛选用 `--today`（今天交的）/ `--cid c7` / `--kaohao GD-J10140` / `--all`；
 `--limit N` 只跑前 N 条（想先试水的时候用）。
 
 **只写 results.json 里的成绩字段**：`tries`（提交次数）不动 —— 重测不是"又交了一次"；

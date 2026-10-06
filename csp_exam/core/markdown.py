@@ -16,6 +16,8 @@ def md_to_html(text: str) -> str:
     in_code = False
     in_list = ""          # "ul" / "ol" / ""
     in_table = False
+    # 正在收集的显示公式块 `$$ … $$`（整块收完才吐出去 —— 见下面那段的说明）
+    in_math: list[str] = []
 
     def inline(t: str) -> str:
         t = html.escape(t)
@@ -38,7 +40,26 @@ def md_to_html(text: str) -> str:
 
     for raw in lines:
         line = raw.rstrip()
-        if line.strip().startswith("```"):
+        stripped = line.strip()
+        # 显示公式块 `$$ … $$`：**整块必须待在同一个元素里**。
+        # KaTeX 是在页面上扫这对定界符的，逐行成段落会把它拆成三段
+        # （`$$` / 公式 / `$$`），定界符配不上对，页面上就把 `$$` 和公式原样显示出来
+        # （踩过：M06 / T00036 那道题的公式全是这样）。
+        if in_math:
+            in_math.append(stripped)
+            if "$$" in stripped:
+                out.append('<div class="math-block">'
+                           + html.escape("\n".join(in_math)) + "</div>")
+                in_math = []
+            continue
+        if stripped.startswith("$$"):
+            close_list(); close_table()
+            if stripped.count("$$") >= 2:          # 一行写完：`$$x$$`
+                out.append('<div class="math-block">' + html.escape(stripped) + "</div>")
+            else:
+                in_math = [stripped]
+            continue
+        if stripped.startswith("```"):
             close_list(); close_table()
             if in_code:
                 out.append("</pre>")
@@ -50,7 +71,6 @@ def md_to_html(text: str) -> str:
         if in_code:
             out.append(html.escape(raw))
             continue
-        stripped = line.strip()
         if not stripped:
             close_list(); close_table()
             continue
@@ -98,5 +118,7 @@ def md_to_html(text: str) -> str:
         out.append(f"<p>{inline(stripped)}</p>")
     if in_code:
         out.append("</pre>")
+    if in_math:                   # `$$` 没写收尾（老师少写了一个）：照样吐出来，别把题面吞了
+        out.append('<div class="math-block">' + html.escape("\n".join(in_math)) + "</div>")
     close_list(); close_table()
     return "\n".join(out)

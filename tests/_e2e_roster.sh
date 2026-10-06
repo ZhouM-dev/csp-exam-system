@@ -2,7 +2,7 @@
 # 验收：名单分组、每场随机分配考号（新格式）、考号表、登录与考场隔离
 #
 # 本轮改造后的口径：
-#   * 考号 = `<前缀>-<级别字母 J/S><5 位纯随机数>`（如 GD-S10029）——**不再是 1..N 的排列**，
+#   * 考号 = `<前缀>-<级别字母 J/S><5 位纯随机数>`（如 GD-S48213）——**不再是 1..N 的排列**，
 #     所以断言的是「格式对 / 场内不重号 / 不是 1..N」这些**规则**，不是某个具体号
 #   * 级别写在考号里，取自比赛字段 level
 #   * 同一个考号出现在多场时，登录要求用本场专用链接（考号按场次随机，天然很难撞号，
@@ -17,9 +17,9 @@ pass() { echo "   [PASS] $1"; PASS=$((PASS+1)); }
 fail() { echo "   [FAIL] $1"; FAIL=$((FAIL+1)); }
 expect() { [ "$2" = "$3" ] && pass "$1（$2）" || fail "$1：实际 [$2] 期望 [$3]"; }
 
-NAMES="张三
-学生17
-王五
+NAMES="学生01
+学生02
+学生03
 赵六
 钱七
 孙八"
@@ -98,7 +98,7 @@ def parse(roster, cid):
 sa, sb = parse(a, '$CA'), parse(b, '$CB')
 lv_a = store.level_of(store.get_contest('$CA'))
 lv_b = store.level_of(store.get_contest('$CB'))
-src = ['张三', '学生17', '王五', '赵六', '钱七', '孙八']
+src = ['学生01', '学生02', '学生03', '赵六', '钱七', '孙八']
 print('  甲场考号顺序：', [(k, v['name']) for k, v, _ in sa])
 print('  乙场考号顺序：', [(k, v['name']) for k, v, _ in sb])
 open('$T/reshuffle_before.txt', 'w').write('|'.join(na))
@@ -130,7 +130,7 @@ grep -q "enter?c=$CA" /tmp/print.html && pass "考号表带本场专用考试链
 python3 - <<'PY'
 import re, html
 p = html.unescape(open('/tmp/print.html', encoding='utf-8').read())
-need = ['张三', '学生17', '王五', '赵六', '钱七', '孙八']
+need = ['学生01', '学生02', '学生03', '赵六', '钱七', '孙八']
 missing = [n for n in need if n not in p]
 rows = re.findall(r'<td><b>([A-Za-z]+-[JS]\d{5})</b></td><td>([^<]+)</td>', p)
 checks = [
@@ -142,6 +142,50 @@ for okv, label in checks:
     print('   [%s] %s' % ('PASS' if okv else 'FAIL', label))
 print('   考号表前 3 行：', rows[:3])
 PY
+
+echo
+echo "=== 3b. 比赛列表：按名单分组分类 + 分组多选筛选 ==="
+# 甲场是从「验收测试班」导入的 6 人，列表里那一行下面应该写着这个分组的人数；
+# 勾上这个分组（`g_<gid>=1`）筛选后，只该剩下它覆盖到的那些比赛。
+curl -s "$BASE/admin?key=$KEY" -o /tmp/home.html
+python3 - "$GID" <<'PY'
+import re, sys
+gid = sys.argv[1]
+p = open('/tmp/home.html', encoding='utf-8').read()
+body = re.sub(r'<script.*?</script>', '', p.split('<body', 1)[-1], flags=re.S)
+flat = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', body))     # 去掉标签看纯文本
+checks = [
+    ('验收测试班 ×' in flat, '比赛标题下面写着各分到了多少人'),
+    ('验收测试班 ×6' in flat, '甲场那 6 个人都算进了「验收测试班」'),
+    ('name="g_%s"' % gid in body, '筛选框按分组生成（g_%s）' % gid),
+    ('按名单分组分类' in flat, '页面上说明了这是按分组分类'),
+]
+for okv, label in checks:
+    print('   [%s] %s' % ('PASS' if okv else 'FAIL', label))
+raise SystemExit(0 if all(k for k, _ in checks) else 1)
+PY
+[ $? = 0 ] && pass "比赛列表按分组分类显示正确" || fail "比赛列表的分组分类不对"
+curl -s "$BASE/admin?key=$KEY&g_$GID=1" -o /tmp/home_f.html
+python3 - "$GID" <<'PY'
+import re, sys
+gid = sys.argv[1]
+p = open('/tmp/home_f.html', encoding='utf-8').read()
+body = re.sub(r'<script.*?</script>', '', p.split('<body', 1)[-1], flags=re.S)
+flat = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', body))
+rows = re.findall(r'<tr><td><span class="tag[^"]*">', body)
+m = re.search(r'当前显示 (\d+) 场', flat)
+n_rows_all = 0
+checks = [
+    ('checked' in body, '筛选后勾选框回显为选中'),
+    (bool(m) and int(m.group(1)) >= 1, '筛选后写明显示几场（%s）' % (m.group(1) if m else '没写')),
+    (bool(rows), '剩下的比赛仍标着分组（%d 行带分组标记）' % len(rows)),
+    ('×6' in flat, '甲场那行还在，人数照旧'),
+]
+for okv, label in checks:
+    print('   [%s] %s' % ('PASS' if okv else 'FAIL', label))
+raise SystemExit(0 if all(k for k, _ in checks) else 1)
+PY
+[ $? = 0 ] && pass "勾选分组筛选（多选）能用" || fail "分组筛选不对"
 
 echo
 echo "=== 4. 学生登录与考场隔离 ==="

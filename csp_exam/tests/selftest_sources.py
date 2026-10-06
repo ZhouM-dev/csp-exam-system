@@ -94,8 +94,8 @@ def main() -> int:
 
     print()
     print("=== 8. 中文/奇怪文件名不影响 ===")
-    p, _ = pick(["张三/candy/糖果.cpp", "张三/road/道路.cpp"])
-    ok(p.get(1) == "张三/candy/糖果.cpp" and p.get(2) == "张三/road/道路.cpp",
+    p, _ = pick(["学生01/candy/糖果.cpp", "学生01/road/道路.cpp"])
+    ok(p.get(1) == "学生01/candy/糖果.cpp" and p.get(2) == "学生01/road/道路.cpp",
        "文件夹对了就行（文件名可以是中文）", p)
 
     print()

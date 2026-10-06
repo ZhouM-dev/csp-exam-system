@@ -36,7 +36,7 @@
 <tr><td><b>题目列表</b></td><td>题库只能在新建题目页底部看到一行行文字，点不进去</td><td><b>独立页面</b>：看编号/标题/测试点/时限，可<b>查看题面</b>、可<b>自己测试</b>（跑全部测试点看数据对不对）</td><td>加题之前先自己验一遍数据</td></tr>
 <tr><td>新建题目</td><td>三种来源分列、要填题目标识、底部列出题库已有题目</td><td><b>一个入口</b>：选文件夹 → 自动识别 → 自动填好 → 改几处就建好；不填标识、不列已有题目<br><b>加题面预览</b>：单独开悬浮窗，按学生视角真渲染 Markdown + 公式；<b>标程</b>改成可直接查看/编辑的代码框</td><td>老师只管出题，标识和编号由系统分配</td></tr>
 <tr><td><b>题目编号</b></td><td>老师手填英文名（m02、candy…）<br>或按出题工程给的分类号，两者都容易写乱</td><td><b>建题时可以自己定</b>（填 <code>candy</code> 就用它）；<b>留空按系统规范分配</b>（<code>T1</code>、<code>T2</code>…），建完不再变</td><td>编号稳定可控，不随题单/题面变化</td></tr>
-<tr><td>考号格式</td><td><code>GD-0001</code></td><td><code>GD-S10029</code>（提高级）<br><code>GD-J58437</code>（入门级）</td><td>广东考号是 GD-S/GD-J + 5 位随机数</td></tr>
+<tr><td>考号格式</td><td><code>GD-0001</code></td><td><code>GD-S48213</code>（提高级）<br><code>GD-J58437</code>（入门级）</td><td>广东考号是 GD-S/GD-J + 5 位随机数</td></tr>
 <tr><td>考试倒计时</td><td>无</td><td><a href="student/hall.html">比赛页</a>顶部常驻大号计时</td><td>真实系统右上角「距离考试结束」</td></tr>
 <tr><td>题目状态卡片</td><td>一行行表格</td><td>白/绿底色卡片（绿＝已交）——<b>本轮已整体删除</b>，含「我的提交」页</td><td>程序回收系统的题目方框</td></tr>
 <tr><td>交卷前检查清单</td><td>无</td><td><a href="student/submitted.html">交卷回执</a>（比赛页上那份已删除，避免和回执重复）</td><td>命名红线：错一个字符该题 0 分</td></tr>
@@ -222,7 +222,7 @@
 <table>
 <tr><th>级别</th><th>考号示例</th><th>时长</th></tr>
 <tr><td><span class="tag tag-level">入门级 J</span></td><td><code>GD-J58437</code></td><td>3.5 小时</td></tr>
-<tr><td><span class="tag tag-level">提高级 S</span></td><td><code>GD-S10029</code></td><td>4 小时</td></tr>
+<tr><td><span class="tag tag-level">提高级 S</span></td><td><code>GD-S48213</code></td><td>4 小时</td></tr>
 </table>
 <p class="muted">考号的 5 位数字是<b>纯随机数</b>，不是从 1 顺着排的——和学生姓名、名单顺序、机位都无关，同一场不重号，不同场次各发各的。</p>
 <p style="margin-top:14px"><b>赛制</b>只影响三件事：怎么判分、是否实时看分、怎么计分。

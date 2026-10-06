@@ -154,6 +154,34 @@ def main() -> int:
     ok(all("样例" not in c[1] and "大样例" not in c[1] for c in p["cases"]), "样例没混进评测数据")
 
     print()
+    print("=== 6b. 落盘的测试点内容 = **上传的那份字节**（不能是路径）===")
+    # 踩过：`pair_cases()` / `detect_bundle()` 给的都是**路径**（"哪个文件"），
+    # 判题引擎要的是**内容**（"文件里是什么"），中间那一步映射在改成直接落盘时漏了 ——
+    # 结果 `.in`/`.out` 里写的是路径字符串本身，学生交什么都判错，而页面上一切正常。
+    # 这条断言就是盯它，别再悄悄回来。
+    from csp_exam.core import judgelocal
+    tmp3 = tempfile.mkdtemp(prefix="mk-cases-")
+    old_pd, old_dd = judgelocal.PROBLEMS_DIR, store.DATA_DIR
+    try:
+        judgelocal.PROBLEMS_DIR = os.path.join(tmp3, "problems")
+        store.DATA_DIR = tmp3
+        rep = mp.create_problem("Z9001", "落盘自检", bundle, overwrite=True)
+        ok(rep.get("ok"), "建题成功", rep.get("error", ""))
+        d = judgelocal.cases_dir("Z9001")
+        got = sorted(os.listdir(d)) if os.path.isdir(d) else []
+        ok(got == ["1.in", "1.out", "2.in", "2.out"], "落了 4 个测试点文件", got)
+        c_in = open(os.path.join(d, "1.in"), "rb").read()
+        c_out = open(os.path.join(d, "1.out"), "rb").read()
+        ok(c_in == b"1\n", "1.in 里是**内容**（不是路径）", c_in)
+        ok(c_out == b"2\n", "1.out 里是**内容**", c_out)
+        st = os.path.join(tmp3, "statements", "Z9001.md")
+        ok(os.path.isfile(st) and "加边后最小生成树" in io.open(st, encoding="utf-8").read(),
+           "题面同时落到 statements/<pid>.md（学生端读的就是它）")
+    finally:
+        judgelocal.PROBLEMS_DIR, store.DATA_DIR = old_pd, old_dd
+        shutil.rmtree(tmp3, ignore_errors=True)
+
+    print()
     print("=== 7. 多道题 / 只传题目目录 / 扁平上传 ===")
     multi = dict(bundle)
     multi["题目库/G02-另一题/题目.md"] = "# 另一题".encode()

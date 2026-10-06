@@ -276,6 +276,8 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             else:
                 self._admin_home(q, cookie, flash=msg)
             return
+        if path == "/admin/new":
+            return self._admin_new_page(q)
         if path == "/admin/scores":
             self._admin_scores(q)
             return
@@ -299,6 +301,9 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             return self._admin_problems(q) if path == "/admin/problems" else self._api_testcase(q)
         if path == "/admin/statement":          # 改题面（已有题目）
             self._admin_statement(q, flash=q.get("m", ""))
+            return
+        if path == "/admin/problem-detail":     # 题目详情（左改右看：题面+题目名+英文名+标程）
+            self._admin_problem_detail(q, flash=q.get("m", ""))
             return
         if path.startswith("/static/katex/"):
             self._serve_static(path, "/static/katex/",
@@ -451,6 +456,12 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             return
         if path == "/admin/statement":          # 改题面：保存
             self._admin_statement_post()
+            return
+        if path == "/admin/problem-detail":     # 题目详情：保存（题面 + 题目名/英文名/时限/内存）
+            self._admin_problem_detail_post()
+            return
+        if path == "/admin/problem-reupload":   # 题目详情：重传出题文件夹，覆盖这道题
+            self._admin_problem_reupload()
             return
         # T-09 新增的两条：识别出题文件夹（自动填表 / 题面预览）、自己测试（跑全部测试点）
         if path in ("/admin/scan", "/admin/selftest"):

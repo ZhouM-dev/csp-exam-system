@@ -121,27 +121,27 @@ print('  开关已按快照还原：' + '  '.join(line))
 PY
 }
 
-# c1 的夹具是三种情形：张三（全对）、学生17（17/0/70 部分分，老数据 total 是错的）、王五（有名册、无有效提交）
+# c1 的夹具是三种情形：学生01（全对）、学生02（17/0/70 部分分，老数据 total 是错的）、学生03（有名册、无有效提交）
 KH1=$(python3 -c "
 from csp_exam.core import store
-print(store.kaohao_of_name('c1', '张三'))")
+print(store.kaohao_of_name('c1', '学生01'))")
 KH2=$(python3 -c "
 from csp_exam.core import store
-print(store.kaohao_of_name('c1', '学生17'))")
+print(store.kaohao_of_name('c1', '学生02'))")
 KH3=$(python3 -c "
 from csp_exam.core import store
-print(store.kaohao_of_name('c1', '王五'))")
+print(store.kaohao_of_name('c1', '学生03'))")
 if [ -z "$KH1" ] || [ -z "$KH2" ] || [ -z "$KH3" ]; then
-  fail "c1 名单里找不到张三/学生17/王五（夹具丢了？先跑 tests/_cleanup.sh 或检查 data/contests/c1/roster.json）"
+  fail "c1 名单里找不到学生01/学生02/学生03（夹具丢了？先跑 tests/_cleanup.sh 或检查 data/contests/c1/roster.json）"
   echo "================== 结果：$PASS 项通过，$FAIL 项失败 =================="
   exit 1
 fi
-echo "  c1 考号：张三=$KH1 学生17=$KH2 王五=$KH3"
+echo "  c1 考号：学生01=$KH1 学生02=$KH2 学生03=$KH3"
 python3 -c "
 import json
 r = json.load(open('/root/csp-exam/data/contests/c1/results.json'))
 p2 = (r.get('$KH2') or {}).get('problems') or {}
-print('   [%s] 学生17的 17/0/70 分夹具还在（T1=%s T2=%s T3=%s）'
+print('   [%s] 学生02的 17/0/70 分夹具还在（T1=%s T2=%s T3=%s）'
       % ('PASS' if [p2.get('T' + str(i), {}).get('score') for i in (1, 2, 3)] == [17, 0, 70] else 'FAIL',
          p2.get('T1', {}).get('score'), p2.get('T2', {}).get('score'), p2.get('T3', {}).get('score')))
 " || fail "读 c1 夹具失败"
@@ -190,15 +190,15 @@ p = open('/tmp/scores_c1.html', encoding='utf-8').read()
 t = re.sub(r'<[^>]+>', ' ', p)
 row = [l for l in t.splitlines() if '$KH2' in l]
 row = row[0] if row else t
-print('  学生17那行末尾：', row.strip()[-60:])
+print('  学生02那行末尾：', row.strip()[-60:])
 raise SystemExit(0 if '87' in row else 1)
-" && pass "总分按每题得分求和（学生17 = 17+0+70 = 87）" || fail "总分没按每题求和"
+" && pass "总分按每题得分求和（学生02 = 17+0+70 = 87）" || fail "总分没按每题求和"
 has /tmp/scores_c1.html '/admin/student' "成绩表里有进详情页的链接"
 
 echo
 echo "=== 3. 详细提交结果页 ==="
 curl -s -o /tmp/detail.html -w '  GET /admin/student?c=c1&k=$KH1 -> HTTP %{http_code}\n' --max-time 20 "$BASE/admin/student?key=$KEY&c=c1&k=$KH1"
-has /tmp/detail.html "张三" "显示学生姓名"
+has /tmp/detail.html "学生01" "显示学生姓名"
 has /tmp/detail.html "得分" "显示逐题得分"
 has /tmp/detail.html "100 / 100 分" "得分带满分（x/100 分）"
 has /tmp/detail.html "测试点明细" "有测试点明细区块"
@@ -216,11 +216,11 @@ t = re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', ' ', p))
 i = t.find('第 1 题')
 print('  第 1 题片段：', t[i:i+260])
 PY
-printf '  学生17（17/70 分的学生）详情页：'
+printf '  学生02（17/70 分的学生）详情页：'
 curl -s -o /tmp/detail2.html --max-time 20 "$BASE/admin/student?key=$KEY&c=c1&k=$KH2"
 grep -oE "得分 ?[0-9]+ / 100 分" /tmp/detail2.html | sort -u | tr '\n' ' '; echo
 has /tmp/detail2.html "部分正确" "详情页显示部分分"
-# 情况 A：完全没有成绩记录（把王五的记录删掉）→ 应该提示"还没有提交"
+# 情况 A：完全没有成绩记录（把学生03的记录删掉）→ 应该提示"还没有提交"
 python3 - <<PY
 import json, io, shutil
 f = "/root/csp-exam/data/contests/c1/results.json"
@@ -228,7 +228,7 @@ shutil.copyfile(f, "$T/c1_results_backup.json")     # 夹具：跑完要原样�
 r = json.load(io.open(f, encoding="utf-8"))
 r.pop("$KH3", None)
 json.dump(r, io.open(f, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-print("   已清掉 c1 里王五的记录（原记录已备份）")
+print("   已清掉 c1 里学生03的记录（原记录已备份）")
 PY
 printf '  完全没记录的学生：'
 curl -s -o /tmp/detail3a.html -w 'HTTP %{http_code}  ' --max-time 20 "$BASE/admin/student?key=$KEY&c=c1&k=$KH3"
@@ -243,7 +243,7 @@ r = json.load(io.open(f, encoding="utf-8"))
 r["$KH3"] = {"problems": {}, "total": 0,
              "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S")}
 json.dump(r, io.open(f, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
-print("   给王五写了一条空记录")
+print("   给学生03写了一条空记录")
 PY
 curl -s -o /tmp/detail3.html -w '' --max-time 20 "$BASE/admin/student?key=$KEY&c=c1&k=$KH3"
 has /tmp/detail3.html "一次有效提交都没有" "空记录的学生显示「一次有效提交都没有」"
@@ -370,7 +370,7 @@ for k in orphan:
     r.pop(k, None)
 json.dump(r, io.open(f, 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
 e = r.get("$KH3") or {}
-print("  c1 成绩表已还原：王五 =", e.get("problems"), "总分", e.get("total"))
+print("  c1 成绩表已还原：学生03 =", e.get("problems"), "总分", e.get("total"))
 if orphan:
     print("  清掉旧脚本留下的孤儿记录：", orphan)
 PY

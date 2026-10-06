@@ -38,9 +38,9 @@ from ..core.grading import graded_cell, graded_text
 from ..core.util import log, _fmt_bytes, _fmt_ms, _fmt_kb
 from ..config import (HERE, MAX_PS_UPLOAD, PORT, PS_JOBS, PS_JOBS_LOCK,
                       HYDRO_ADMIN_PW_FILE)
-from .urls import admin_url, cid_query, statement_url
+from .urls import admin_url, cid_query, problem_detail_url, statement_url
 from .ui import (page, rule_badge, render_upload_tree_html, md_to_html,
-                 level_badge, modal)
+                 level_badge, modal, code_pre)
 
 
 def _js_json(obj) -> str:
@@ -116,6 +116,92 @@ def remember_problem(pid: str, *, title: str = "", code: str = "", name: str = "
             for stale in order[:len(items) - PROBLEM_INFO_MAX]:
                 items.pop(stale, None)
         save_problem_info(items)
+
+
+def remember_meta(pid: str, *, title: str = "", name: str = "", time_ms=None,
+                  memory_mb=None) -> dict:
+    """改一道题的元信息（题目详情页的「保存修改」用）：题目名 / 英文名 / 时限 / 内存。
+
+    为什么写**两处**（各自是某一列的权威来源，少写一处就会出现"改了没生效"）：
+
+      * `data/problem_codes.json` —— 英文名 `name`、题目名 `title`。
+        列表页的「英文名」列读的是 `name_of_pid(pid, codes)`，它**优先看这张表**；
+        这张表里没有这条记录时才退回 `problem_info.json`。
+      * `data/problem_info.json`（`remember_problem`）—— 题目名 / 测试点数 / 时限 / 内存 / 标程。
+        `localoj.list_problems()`（题库清单）、`judgelocal.limits_of()`（判题时的时限内存）
+        读的都是这里 —— 所以改时限内存**真的会改变判题**，不是只改个显示。
+
+    返回 `{"ok", "changed", "skipped", "error"}`：`changed` 里是真正变了的字段，
+    `skipped` 里是"你填了空/0，我没敢写"的字段 —— 页面照实说，
+    没改动就说没改动，别谎报"已保存"（也别静悄悄地什么都不做）。
+
+    为什么要挑着写：
+
+      * **英文名可以清空**（留空就是没英文名，列表里显示空白，合法）。
+      * **题目名不能清空** —— 清掉了老师在列表里就认不出哪道是哪道（列表退回显示题库标识）。
+        要换名字就直接写新的；留空按"没改"处理，并且报出来。
+      * **时限 / 内存必须正整数** —— 写 0 会让下一次判题变成"限时 0 毫秒"，全部 TLE，
+        这种"一保存就把题废了"的操作不能干，按"没改"处理并报出来。
+    """
+    out = {"ok": False, "changed": [], "skipped": [], "error": ""}
+    pid = str(pid or "").strip()
+    if not pid:
+        out["error"] = "没有指定题目标识"
+        return out
+    title = str(title or "").strip()
+    name = str(name or "").strip()
+
+    def _int(v):
+        try:
+            return int(str(v).strip() or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    time_ms, memory_mb = _int(time_ms), _int(memory_mb)
+    changed, skipped = [], []
+    codes = make_problem.load_codes()
+    info0 = load_problem_info().get(pid) or {}
+    rec = dict(codes.get(pid) or {})
+    old_title = str(info0.get("title") or rec.get("title") or "")
+    old_name = str(rec.get("name") or info0.get("name") or "")
+    if not title:
+        if old_title:
+            skipped.append("题目名（留空没改 —— 清掉就认不出是哪道题了）")
+    elif title != old_title:
+        rec["title"] = title
+        changed.append("题目名")
+    if name != old_name:
+        rec["name"] = name                      # 英文名允许清空
+        changed.append("英文名")
+    if changed:
+        rec.setdefault("code", make_problem.code_of_pid(pid, codes) or "")
+        rec["at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        codes[pid] = rec
+        make_problem.save_codes(codes)
+    old_ms, old_mb = int(info0.get("time_ms") or 0), int(info0.get("memory_mb") or 0)
+    if not time_ms:
+        if old_ms:
+            skipped.append("时限（要正整数，没改）")
+        time_ms = 0
+    elif time_ms != old_ms:
+        changed.append("时限")
+    if not memory_mb:
+        if old_mb:
+            skipped.append("内存（要正整数，没改）")
+        memory_mb = 0
+    elif memory_mb != old_mb:
+        changed.append("内存")
+    # 题目名/时限/内存落 `problem_info.json`（`remember_problem` 里空值不覆盖，正合适）
+    remember_problem(pid, title=title, time_ms=time_ms or None, memory_mb=memory_mb or None)
+    # 题库清单是**缓存**（列表页先读它）：不刷新的话，改了题目名要等下一次刷新才看得见
+    try:
+        store.save_catalog(localoj.list_problems())
+    except (hydro.HydroError, OSError) as e:                    # noqa: BLE001
+        log(f"[管理端] 改题目名后刷新题库缓存失败：{e!r}")
+    out["ok"] = True
+    out["changed"] = changed
+    out["skipped"] = skipped
+    return out
 
 
 # =====================================================================
@@ -477,36 +563,76 @@ PROBLEMS_JS = """<script>
   var CAND = window.CSP_CAND || {};
   function $(id) { return document.getElementById(id); }
 
-  /* ---------------- 查看题面（按学生视角渲染）---------------- */
-  document.querySelectorAll('[data-view]').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      var pid = btn.getAttribute('data-view');
-      var p = CAND[pid] || {};
-      $('pv-sub').textContent = '· ' + (p.code || '') +
-        (p.name ? ' ' + p.name : '') + ' ' + (p.title || '');
-      $('pv-head').innerHTML = '<code>' + (p.code || '—') + '</code> ' +
-        (p.name ? '<code>' + p.name + '</code> ' : '') +
-        (p.title || '') + ' · 满分 ' + (p.full || 100);
-      var box = $('pv-body');
-      box.innerHTML = '<p class="muted">正在读取题面…</p>';
-      if (window.openModal) window.openModal('pv-modal');
-      /* 题面是点开才去取的（页面加载不查数据库；取过一次会缓存 6 小时） */
-      var body = new URLSearchParams();
-      body.set('render', '1');
-      body.set('pid', pid);
-      /* 这里必须是**不带 key 的裸路径**：密钥由下面那一次 `CSP_KEY_QUERY` 拼上去。
-         以前这里传的是 admin_url(...)（已经带 `?key=`），再拼一次就成了
-         `/admin/scan?key=X?key=X` —— key 被解析成 "X?key=X"，一律 403
-         「管理密钥不正确」，点「查看题面」永远只看到报错。 */
-      fetch('{scan_url}' + (window.CSP_KEY_QUERY || ''), { method: 'POST', body: body })
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          if (!d.ok) { box.innerHTML = '<p class="err">' + (d.error || '读取题面失败') + '</p>'; return; }
-          box.innerHTML = d.html || '<p class="muted">这道题在考试服务里还没有题面（题面存在评测站，老师写没写过以评测站为准）。</p>';
-          cspRenderMath(box);
-        })
-        .catch(function (e) { box.innerHTML = '<p class="err">读取题面失败：' + e + '</p>'; });
-    });
+  /* ---------------- 删除 / 恢复 / 彻底删除 ----------------
+     一律走 fetch，拿服务端回的新表格 HTML 就地换掉：**页面不跳转、滚动位置不丢**。
+     以前这三样是 form POST + 302 回列表页，点完删除整页重载、人会被弹回页面顶部，
+     刚删的那行去哪了也看不见（这一版专门改的就是这个）。 */
+  var ACT_ASK = {
+    'delete': function (t, pid) {
+      return '确定删除题目 ' + t + '（' + pid + '）？\\n只是从列表里收起来 —— '
+           + '题面和历史提交记录都还看得到，随时可以恢复。';
+    },
+    'restore': function (t, pid) {
+      return '把题目 ' + t + '（' + pid + '）放回「全部题目」？';
+    },
+    'purge': function (t, pid) {
+      return '彻底删除 ' + pid + '？\\n题目数据、题目编号、题面缓存、大样例都会一起删掉，'
+           + '删了就找不回来了；历史提交记录里这道题会显示为已删除。';
+    }
+  };
+
+  function probFlash(text, kind) {
+    var box = $('prob-flash');
+    if (!box) return;
+    box.innerHTML = text
+      ? '<div class="flash flash-' + (kind || 'ok') + '">' + text + '</div>' : '';
+  }
+
+  function probAct(btn, what) {
+    var attr = what === 'delete' ? 'data-del' : (what === 'restore' ? 'data-restore' : 'data-purge');
+    var pid = btn.getAttribute(attr) || '';
+    var title = btn.getAttribute('data-title') || pid;
+    if (!pid || !ACT_ASK[what]) return;
+    if (!confirm(ACT_ASK[what](title, pid))) return;
+    var tr = btn.closest ? btn.closest('tr') : null;
+    if (tr) tr.classList.add('row-busy');            /* 先灰掉，别让人以为没点上 */
+    var url = '/admin/problem' + (window.CSP_KEY_QUERY || '');
+    url += (url.indexOf('?') >= 0 ? '&' : '?') + 'json=1';
+    var body = new URLSearchParams();
+    body.set('action', what);
+    body.set('pid', pid);
+    fetch(url, { method: 'POST', body: body })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (tr) tr.classList.remove('row-busy');
+        if (!d || !d.ok) { probFlash((d && (d.message || d.error)) || '没成功', 'err'); return; }
+        var tb = $('prob-rows');
+        if (tb && typeof d.rows === 'string') tb.innerHTML = d.rows;
+        var del = $('prob-del');                       /* 整块换：刚删的题就在这堆里 */
+        if (del && typeof d.deleted_html === 'string' && del.parentNode) {
+          var tmp = document.createElement('div');
+          tmp.innerHTML = d.deleted_html;
+          var next = tmp.firstElementChild;
+          if (next) del.parentNode.replaceChild(next, del);
+        }
+        var cnt = $('prob-live-count');
+        if (cnt && typeof d.live_count === 'number') cnt.textContent = d.live_count;
+        probFlash(d.message, 'ok');
+      })
+      .catch(function (e) {
+        if (tr) tr.classList.remove('row-busy');
+        probFlash('操作失败：' + e, 'err');
+      });
+  }
+
+  /* 事件委托：表格被整块换掉以后，新行里的按钮照样点得动 */
+  document.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest
+      ? e.target.closest('[data-del],[data-restore],[data-purge]') : null;
+    if (!btn) return;
+    e.preventDefault();
+    probAct(btn, btn.hasAttribute('data-del') ? 'delete'
+              : (btn.hasAttribute('data-restore') ? 'restore' : 'purge'));
   });
 
   /* ---------------- 自己测试 ---------------- */
@@ -527,8 +653,7 @@ PROBLEMS_JS = """<script>
       refreshCount();
     });
   }
-  document.querySelectorAll('[data-test]').forEach(function (btn) {
-    btn.addEventListener('click', function () {
+  function openTest(btn) {
       var key = btn.getAttribute('data-test');
       var p = CAND[key] || {};
       cur = key;
@@ -549,7 +674,11 @@ PROBLEMS_JS = """<script>
       refreshCount();
       $('test-result').hidden = true;
       if (window.openModal) window.openModal('test-modal');
-    });
+  }
+
+  document.addEventListener('click', function (e) {
+    var btn = e.target && e.target.closest ? e.target.closest('[data-test]') : null;
+    if (btn) openTest(btn);
   });
   var run = $('test-run');
   if (run) run.addEventListener('click', function () {
@@ -581,6 +710,86 @@ PROBLEMS_JS = """<script>
         $('test-result').hidden = false;
       })
       .catch(function (e) { hint.innerHTML = '　<span class="err">测试失败：' + e + '</span>'; });
+  });
+})();
+</script>"""
+
+
+#: 题目详情页的交互：右边跟着左边改、视图切换、编辑小习惯（Tab / Ctrl+S）。
+PROBLEM_DETAIL_JS = """<script>
+(function () {
+  var wrap = document.getElementById('pd-wrap');
+  var src = document.getElementById('pd-src');
+  var box = document.getElementById('pd-render');
+  var note = document.getElementById('pd-note');
+  if (!wrap || !src || !box) return;
+
+  /* ---------------- 视图：左右对照 / 只看编辑 / 只看成品 ----------------
+     记在 localStorage 里：小屏（或只想专心改题面时）选了「只看左边」，
+     刷新、保存之后还是那个视图，不用每次重选。 */
+  var MODE_KEY = 'csp-pd-mode';
+  function setMode(mode) {
+    if (['both', 'left', 'right'].indexOf(mode) < 0) mode = 'both';
+    wrap.setAttribute('data-mode', mode);
+    document.querySelectorAll('[data-pd-mode]').forEach(function (b) {
+      b.classList.toggle('on', b.getAttribute('data-pd-mode') === mode);
+    });
+    try { localStorage.setItem(MODE_KEY, mode); } catch (e) { /* 隐私模式忽略 */ }
+  }
+  document.querySelectorAll('[data-pd-mode]').forEach(function (b) {
+    b.addEventListener('click', function () { setMode(b.getAttribute('data-pd-mode')); });
+  });
+  var saved = 'both';
+  try { saved = localStorage.getItem(MODE_KEY) || 'both'; } catch (e) { /* 忽略 */ }
+  setMode(saved);
+
+  /* ---------------- 右边跟着左边改 ----------------
+     渲染**在服务端**（core/markdown.py，和题面页同一份逻辑）——
+     前端不引 markdown 库，也就不会出现"预览挺好看、学生看到的却是另一回事"。 */
+  var timer = null, seq = 0, lastSent = null;
+  function render() {
+    var text = src.value;
+    if (text === lastSent) return;
+    lastSent = text;
+    var mine = ++seq;
+    var body = new URLSearchParams();
+    body.set('render', '1');
+    body.set('statement', text);
+    fetch('/admin/scan' + (window.CSP_KEY_QUERY || ''), { method: 'POST', body: body })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (mine !== seq) return;                       /* 慢的那个回包丢掉 */
+        if (!d.ok) { if (note) note.textContent = '　' + (d.error || '渲染失败'); return; }
+        box.innerHTML = d.html || '<p class="muted">（题面还是空的）</p>';
+        if (window.cspRenderMath) cspRenderMath(box);
+        if (note) note.textContent = '　右边已跟着更新 · ' +
+          (text ? text.split('\\n').length + ' 行 / ' + text.length + ' 字符' : '空');
+      })
+      .catch(function (e) { if (note) note.textContent = '　渲染失败：' + e; });
+  }
+  src.addEventListener('input', function () {
+    if (note) note.textContent = '　正在渲染…';
+    clearTimeout(timer);
+    timer = setTimeout(render, 400);
+  });
+
+  /* ---------------- 编辑小习惯 ----------------
+     Tab 插 4 个空格（写 Markdown 的缩进/代码块要），Ctrl+S 保存 */
+  src.addEventListener('keydown', function (e) {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      var s = this.selectionStart, t = this.selectionEnd;
+      this.value = this.value.slice(0, s) + '    ' + this.value.slice(t);
+      this.selectionStart = this.selectionEnd = s + 4;
+      clearTimeout(timer);
+      timer = setTimeout(render, 400);
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+      e.preventDefault();
+      var form = document.getElementById('pd-form');
+      if (form) form.submit();
+    }
   });
 })();
 </script>"""
@@ -661,12 +870,65 @@ class AdminPages:
 
     def _admin_home(self, q: dict, cookie: str = "", flash: str = ""):
         key = q.get("key", "")
+        # ---- 按「名单分组」看比赛：哪个组的成员被分到了哪几场 ----
+        # 分组里存的是**姓名**（groups.json 的 students），比赛名单里也只有考号→姓名，
+        # 两边都没有"这个学生属于哪个组"的字段 —— 所以按姓名匹配。一个人在多个组里
+        # （集训班 + 周末班）就**每个组都算他一份**：这样"南山S 的成员上了哪几场"才是全的。
+        # 谁的分组都匹配不上（名单是手打的）→ 归「（未分组）」。
+        groups = store.load_groups()
+        name2groups: dict[str, list[str]] = {}
+        for g in groups:
+            gname = str(g.get("name") or g.get("gid") or "")
+            for nm in (g.get("students") or []):
+                name2groups.setdefault(str(nm), []).append(gname)
+        OTHER = "（未分组）"
+
+        def breakdown(roster: dict) -> dict:
+            """这场比赛的名单里，每个分组各有多少人。"""
+            cnt: dict[str, int] = {}
+            for rec in (roster or {}).values():
+                gs = name2groups.get(str((rec or {}).get("name") or ""))
+                for gname in (gs or [OTHER]):
+                    cnt[gname] = cnt.get(gname, 0) + 1
+            return cnt
+
+        # 筛选：勾了哪几个组（多选）。用 `g_<gid>=1` 这种**一个组一个字段名**的写法，
+        # 浏览器一次提交多个勾选框也不会互相覆盖（后端的 _query() 每个键只留第一个值，
+        # 用 `g=g1&g=g2` 会只剩 g1 —— 踩过这个坑）。
+        sel = {str(g.get("name") or g.get("gid") or "")
+               for g in groups if q.get("g_" + str(g.get("gid") or ""))}
+        want_other = bool(q.get("g__none"))
+        filtering = bool(sel or want_other)
+
+        def matched(bd: dict) -> bool:
+            if not filtering:
+                return True
+            if want_other and bd.get(OTHER):
+                return True
+            return any(bd.get(n) for n in sel)
+
         rows = []
-        for c in store.list_contests():
+        hits: dict[str, int] = {}                 # 每个组一共上了多少场（不受筛选影响）
+        n_all = 0
+        for c in sorted(store.list_contests(),
+                        key=lambda c: (str(c.get("created_at") or ""), str(c.get("id") or "")),
+                        reverse=True):
             roster = store.load_roster(c["id"])
             results = store.load_results(c["id"])
             exam = store.load_exam(c["id"])
             rel = bool(exam.get("released"))
+            bd = breakdown(roster)
+            n_all += 1
+            for gname in bd:
+                hits[gname] = hits.get(gname, 0) + 1
+            if not matched(bd):
+                continue
+            # 这一场里各组分到多少人：勾中的组用徽章高亮，没勾的淡着显示
+            chips = " · ".join(
+                (f'<span class="tag">{html.escape(gname)} ×{n}</span>'
+                 if (gname in sel or (gname == OTHER and want_other))
+                 else f'<span class="muted">{html.escape(gname)} ×{n}</span>')
+                for gname, n in sorted(bd.items(), key=lambda kv: (-kv[1], kv[0]))[:4])
             # 「发布成绩」就放在比赛旁边：老师考完直接在这里公布，不用点进比赛里找。
             # 公布后学生立刻能在「我的比赛 / 查成绩」看到自己的分数（「我的提交」页本轮已删）。
             rel_btn = (
@@ -677,7 +939,9 @@ class AdminPages:
                 f'{"收回成绩" if rel else "发布成绩"}</button></form> ')
             rows.append(
                 f'<tr><td>{rule_badge(c)}</td><td>{level_badge(c)}</td>'
-                f'<td><b>{html.escape(c["title"])}</b></td>'
+                f'<td><b>{html.escape(c["title"])}</b>'
+                + (f'<br><span style="font-size:12.5px">{chips}</span>' if chips else "")
+                + f'</td>'
                 f'<td>{len(roster)}</td><td>{len(results)}</td>'
                 f'<td>{"开放" if c.get("open", True) else "关闭"} / '
                 f'{"已公布" if rel else "未公布"}</td>'
@@ -688,6 +952,152 @@ class AdminPages:
                 f'<form method="post" action="/admin/delete{cid_query(key, c["id"])}" style="display:inline" '
                 f'onsubmit="return confirm(\'确定删除这场比赛？名单、成绩、提交的代码都会一起删除。\')">'
                 f'<button class="btn btn-sm btn-danger" type="submit">删除</button></form></td></tr>')
+        n_matched = len(rows)
+        page_size = 10
+        page_count = max(1, (n_matched + page_size - 1) // page_size)
+        try:
+            current_page = int(q.get("page", "1"))
+        except (ValueError, TypeError):
+            current_page = 1
+        current_page = max(1, min(current_page, page_count))
+        offset = (current_page - 1) * page_size
+        rows = rows[offset:offset + page_size]
+        show_txt = f"，符合条件 {n_matched} 场" if filtering else ""
+
+        def page_url(number: int) -> str:
+            params = {"page": str(number)}
+            if key:
+                params["key"] = key
+            for group in groups:
+                field = "g_" + str(group.get("gid") or "")
+                if q.get(field):
+                    params[field] = "1"
+            if want_other:
+                params["g__none"] = "1"
+            return html.escape("/admin?" + urllib.parse.urlencode(params), quote=True)
+
+        page_links = []
+        if current_page > 1:
+            page_links.append(f'<a class="btn btn-sm btn-gray" href="{page_url(current_page - 1)}">上一页</a>')
+        numbers = sorted({1, page_count, *range(max(1, current_page - 2), min(page_count, current_page + 2) + 1)})
+        last = 0
+        for number in numbers:
+            if last and number > last + 1:
+                page_links.append('<span class="muted">…</span>')
+            if number == current_page:
+                page_links.append(f'<span class="btn btn-sm" aria-current="page">{number}</span>')
+            else:
+                page_links.append(f'<a class="btn btn-sm btn-gray" href="{page_url(number)}">{number}</a>')
+            last = number
+        if current_page < page_count:
+            page_links.append(f'<a class="btn btn-sm btn-gray" href="{page_url(current_page + 1)}">下一页</a>')
+        pagination = (f'<nav class="row contest-pagination" aria-label="比赛分页">'
+                      f'<span class="muted">共 {n_matched} 场 · 每页 {page_size} 场 · '
+                      f'第 {current_page} / {page_count} 页</span> ' + " ".join(page_links) + '</nav>')
+        # 下拉里的勾选框（**没有 JS 时面板是展开的**，退化成普通勾选框照样能用；
+        # 有 JS 才收成下拉 —— 点按钮展开、勾完点「确定」提交）。
+        boxes = []
+        for g in groups:
+            gid = str(g.get("gid") or "")
+            gname = str(g.get("name") or gid)
+            boxes.append(
+                f'<label><input type="checkbox" name="g_{html.escape(gid, quote=True)}" value="1"'
+                + (" checked" if gname in sel else "")
+                + f'> <span class="gmul-name">{html.escape(gname)}</span>'
+                + f'<span class="muted"> {len(g.get("students") or [])} 人'
+                + f' · {hits.get(gname, 0)} 场</span></label>')
+        if hits.get(OTHER):
+            boxes.append(
+                '<label><input type="checkbox" name="g__none" value="1"'
+                + (" checked" if want_other else "")
+                + f'> <span class="gmul-name">{OTHER}</span>'
+                + f'<span class="muted"> {hits.get(OTHER, 0)} 场</span></label>')
+        boxes_html = "".join(boxes) or \
+            '<p class="muted" style="margin:0">还没有名单分组，可先去「管理名单分组」新建一批学生。</p>'
+        picked = [str(x.get("name") or x.get("gid") or "") for x in groups if
+                  str(x.get("name") or x.get("gid") or "") in sel]
+        if want_other:
+            picked.append(OTHER)
+        gmul_txt = ("全部分组" if not picked else
+                    ("、".join(picked[:2]) + (f" 等 {len(picked)} 组" if len(picked) > 2 else "")))
+        body = f"""
+{self._flash("ok", flash) if flash else ""}
+{self._admin_nav(key)}
+<p class="muted">名单分组是"一批学生"，可以反复用在不同考试里；每场考试的考号都会重新随机分配。
+ <a class="btn btn-sm btn-gray" href="{admin_url(key, path='/admin/groups')}">管理名单分组</a></p>
+<h2>已有比赛（{n_all} 场）</h2>
+<div class="card">
+  <form method="get" action="/admin" class="contest-toolbar" style="margin:0">
+    <input type="hidden" name="key" value="{html.escape(key, quote=True)}">
+    <div class="gmul">
+      <button type="button" class="btn btn-sm btn-gray" id="gmul-btn" aria-expanded="false" aria-controls="gmul-panel">分组：{html.escape(gmul_txt)} ▾</button>
+      <div class="gmul-panel" id="gmul-panel">
+        <p class="muted" style="margin:0 0 6px"><b>按名单分组分类</b>（可多选）——
+          只显示「勾中的组里有成员」的比赛；一个人同时在两个组里就两边都算。</p>
+        <div class="gmul-options">{boxes_html}</div>
+        <div class="gmul-foot">
+          <button type="submit" class="btn btn-sm">确定</button>
+          <a class="btn btn-sm btn-gray" href="/admin{cid_query(key, "")}">清空</a>
+          <span class="muted">共 {n_all} 场{show_txt}</span>
+        </div>
+      </div>
+    </div>
+    <a class="btn btn-sm" href="{admin_url(key, path='/admin/new')}">新建比赛</a>
+    <span class="muted contest-list-note">按创建时间从新到旧 · ×N 表示该组参赛人数</span>
+  </form>
+</div>
+<script>
+(function () {{
+  var btn = document.getElementById('gmul-btn');
+  var panel = document.getElementById('gmul-panel');
+  if (!btn || !panel) return;
+  panel.hidden = true;                       /* 有 JS 才收成下拉；没 JS 时它是展开的 */
+  function toggle(show) {{
+    panel.hidden = (show === undefined) ? !panel.hidden : !show;
+    btn.setAttribute('aria-expanded', String(!panel.hidden));
+  }}
+  btn.addEventListener('click', function (e) {{ e.stopPropagation(); toggle(); }});
+  panel.addEventListener('click', function (e) {{ e.stopPropagation(); }});
+  document.addEventListener('click', function () {{ toggle(false); }});
+  document.addEventListener('keydown', function (e) {{ if (e.key === 'Escape' && !panel.hidden) {{ toggle(false); btn.focus(); }} }});
+  function refresh() {{
+    var picked = [];
+    panel.querySelectorAll('input[type=checkbox]').forEach(function (b) {{
+      if (b.checked) {{
+        var n = b.parentElement.querySelector('.gmul-name');
+        if (n) picked.push(n.textContent.trim());
+      }}
+    }});
+    btn.textContent = '分组：' + (picked.length
+      ? picked.slice(0, 2).join('、') + (picked.length > 2 ? ' 等 ' + picked.length + ' 组' : '')
+      : '全部分组') + ' ▾';
+  }}
+  panel.querySelectorAll('input[type=checkbox]').forEach(function (b) {{
+    b.addEventListener('change', refresh);
+  }});
+  refresh();
+}})();
+</script>
+<div class="card" style="overflow:auto">
+<table class="nowrap" id="contest-table"><tr><th>赛制</th><th>级别</th><th>名称</th><th>名单</th><th>已提交</th>
+<th>状态</th><th>创建时间</th><th>操作</th></tr>
+{"".join(rows) or ('<tr><td colspan="8" class="muted">没有符合条件的比赛（换个分组试试，或点「清空」）。</td></tr>' if filtering else '<tr><td colspan="8" class="muted">还没有比赛，点击「新建比赛」创建第一场。</td></tr>')}
+</table>
+</div>
+{pagination}
+<p class="muted">「发布成绩」= 学生立刻能在自己的页面（我的比赛 / 查成绩）看到自己的分数。
+ 所有赛制均在老师公布后可见；发布之后随时可以「收回成绩」。</p>
+<p class="muted">要加题目？在「<a href="{admin_url(key, path='/admin/problems')}">题目列表</a> ·
+ <a href="{admin_url(key, path='/admin/problem')}">新建题目</a>」里选整个出题文件夹（或 zip），
+ 系统会自动识别题面、测试数据、标程与大样例。</p>
+"""
+        self._send(page("管理端 · 比赛列表", body), cookie=cookie)
+
+    def _admin_new_page(self, q: dict):
+        key = q.get("key", "")
+        if not self._check_admin(key):
+            self._admin_login()
+            return
         rules_desc = "".join(f'<li>{rule_badge({"rule": k})} {html.escape(v["name"])}：'
                              f'{html.escape(v["desc"])}</li>' for k, v in store.RULES.items())
         # 级别下拉：时长跟着级别给个默认值（J 210 / S 240），换级别时 JS 顺手改一下输入框
@@ -697,16 +1107,13 @@ class AdminPages:
             f'默认 {store.LEVEL_MINUTES[lv]} 分钟）</option>'
             for lv in ("J", "S"))
         body = f"""
-{self._flash("ok", flash) if flash else ""}
 {self._admin_nav(key)}
-<p class="muted">名单分组是"一批学生"，可以反复用在不同考试里；每场考试的考号都会重新随机分配。
- <a class="btn btn-sm btn-gray" href="{admin_url(key, path='/admin/groups')}">管理名单分组</a></p>
 <h2>新建比赛</h2>
 <div class="card">
 <form method="post" action="/admin/new{cid_query(key, "")}">
 <div class="row">
   <span>比赛名称</span>
-  <input type="text" name="title" placeholder="例如 2026 CSP-J 模拟赛" style="width:320px">
+  <input type="text" name="title" placeholder="例如 2026 CSP-J 模拟赛" style="width:320px;max-width:100%">
   <span>赛制</span>
   <select name="rule" style="width:200px">
     {"".join(f'<option value="{k}">{html.escape(v["name"])}</option>' for k, v in store.RULES.items())}
@@ -714,7 +1121,7 @@ class AdminPages:
 </div>
 <div class="row" style="margin-top:10px">
   <span>级别</span>
-  <select name="level" id="csp-new-level" style="width:280px">{level_opts}</select>
+  <select name="level" id="csp-new-level" style="width:280px;max-width:100%">{level_opts}</select>
   <span>比赛时长</span>
   <input type="text" name="duration" id="csp-new-duration"
          value="{store.LEVEL_MINUTES[store.DEFAULT_LEVEL]}" style="width:70px"> 分钟
@@ -723,7 +1130,9 @@ class AdminPages:
   <code>GD-J·····</code>、提高级 <code>GD-S·····</code>（5 位纯随机数，不是从 1 顺着排）。
   学生交完只看到「已提交」，成绩由老师点「公布成绩」后才可见。</p>
 <ul class="muted">{rules_desc}</ul>
-<p style="margin-top:10px"><button type="submit">新建</button></p>
+<p class="muted">创建后进入本场管理，继续设置名单、考号前缀和比赛题目。</p>
+<p class="row" style="margin-top:10px"><button type="submit">创建比赛并继续设置</button>
+<a class="btn btn-gray" href="{admin_url(key)}">返回比赛列表</a></p>
 </form>
 </div>
 <script>
@@ -739,20 +1148,8 @@ class AdminPages:
 }})();
 </script>
 
-<h2>已有比赛</h2>
-<div class="card" style="overflow:auto">
-<table class="nowrap"><tr><th>赛制</th><th>级别</th><th>名称</th><th>名单</th><th>已提交</th>
-<th>状态</th><th>创建时间</th><th>操作</th></tr>
-{"".join(rows) or '<tr><td colspan="8" class="muted">还没有比赛，先在上面新建一场。</td></tr>'}
-</table>
-</div>
-<p class="muted">「发布成绩」= 学生立刻能在自己的页面（我的比赛 / 查成绩）看到自己的分数。
- OI、CSP 赛制默认看不到分数，IOI 赛制本来就实时可见；发布之后随时可以「收回成绩」。</p>
-<p class="muted">要加题目？在「<a href="{admin_url(key, path='/admin/problems')}">题目列表</a> ·
- <a href="{admin_url(key, path='/admin/problem')}">新建题目</a>」里选整个出题文件夹（或 zip），
- 系统会自动识别题面、测试数据、标程与大样例。</p>
 """
-        self._send(page("管理端 · 比赛列表", body), cookie=cookie)
+        self._send(page("管理端 · 新建比赛", body))
 
     def _admin_contest(self, q: dict, cookie: str = "", flash: str = ""):
         key = q.get("key", "")
@@ -895,7 +1292,7 @@ class AdminPages:
 </div>
 <p style="margin-top:12px"><b>② 或者临时粘贴名单</b>（每行一个姓名，可从 Excel 整列粘贴；
    不用动就留空，保存时跳过）：</p>
-<textarea name="names" placeholder="张三&#10;学生17&#10;王五" style="min-height:110px"></textarea>
+<textarea name="names" placeholder="学生01&#10;学生02&#10;学生03" style="min-height:110px"></textarea>
 <div class="row" style="margin-top:12px">
   <label><input type="radio" name="mode" value="append" checked style="width:auto"> 追加（已有学生保持原考号）</label>
   <label><input type="radio" name="mode" value="replace" style="width:auto"> 重建（清空后全部重发考号）</label>
@@ -1355,7 +1752,7 @@ class AdminPages:
 <p>分组名称 <input type="text" name="group_name" placeholder="例如 初三1班 / 集训A班"
    style="width:280px;display:inline-block"></p>
 <p style="margin-top:10px">学生姓名，每行一个（也可从 Excel 整列粘贴）：</p>
-<textarea name="names" placeholder="张三&#10;学生17&#10;王五"></textarea>
+<textarea name="names" placeholder="学生01&#10;学生02&#10;学生03"></textarea>
 <p style="margin-top:12px"><button type="submit">保存分组</button></p>
 <p class="muted">分组只是"一批学生"，可以反复用在不同考试里；每场考试的考号会自动随机分配。</p>
 </form>
@@ -1659,6 +2056,8 @@ class AdminPages:
             f'<th>{html.escape(store.slug_of(p))}'
             f'<span class="muted">/{p.get("full", 100)}</span></th>' for p in probs)
         body_rows = []
+        # 一行占满整张表的空表提示（列数 = 名次/姓名/考号 + 每题 + 总分/提交时间）
+        n_col = 6 + len(probs)
         for r in rows:
             cells = []
             for p in probs:
@@ -1687,6 +2086,8 @@ class AdminPages:
         miss_html = ("<p class='warn'>还没有提交的学生：" +
                      "、".join(f'{html.escape(store.student_name(cid, k))}（{k}）' for k in missing) +
                      "</p>") if missing else ""
+        # 一行占满整张表的空表提示（列数 = 名次/姓名/考号 + 每题 + 总分/提交时间）
+        empty_row = f"<tr><td colspan='{n_col}' class='muted'>还没有任何提交</td></tr>"
         body = f"""
 {self._admin_nav(key, cid)}
 <p>{rule_badge(contest)} {level_badge(contest)}
@@ -1697,11 +2098,10 @@ class AdminPages:
  里面有逐点明细，点每行的状态还能看这一点的输入、学生输出和标准答案。</p>
 <div class="card" style="overflow:auto">
 <table class="nowrap"><tr><th>名次</th><th>姓名</th><th>考号</th>{head}<th>总分</th><th>提交时间</th></tr>
-{"".join(body_rows) or "<tr><td colspan='9' class='muted'>还没有任何提交</td></tr>"}</table>
+ {"".join(body_rows) or empty_row}</table>
 </div>
 {miss_html}"""
         self._send(page(f"成绩总表 · {contest['title']}", body))
-
     def _admin_file(self, q: dict):
         """管理员看学生提交的某个文件（预览/下载）。"""
         key = q.get("key", "")
@@ -2011,6 +2411,123 @@ class AdminPages:
                 text = ""
         return md_to_html(text) if text.strip() else ""
 
+    def _catalog_view(self) -> tuple[list, list, list, dict, str]:
+        """题库的一次完整视图：`(全部, 在用, 已假删除, 用在本场的, 错误信息)`。
+
+        「用在本场」是 `{pid: [「第 1 题·CSP 模拟赛」, …]}`。
+
+        列表页、删除/恢复的回包、题目详情页都用这一份 —— 口径必须一致，
+        否则会出现"点了删除、列表换了一份、一刷新又变回去"这种对不上的事。
+        """
+        rows_all, err = self._catalog_rows()
+        used: dict[str, list[str]] = {}
+        for c in store.list_contests():
+            for p in store.load_exam(c["id"]).get("problems", []):
+                used.setdefault(str(p.get("pid") or ""), []).append(
+                    f'第 {p.get("no")} 题·{c["title"]}')
+        return (rows_all,
+                [r for r in rows_all if not r.get("deleted")],
+                [r for r in rows_all if r.get("deleted")],
+                used, err)
+
+    def _problem_row_html(self, key: str, r: dict, used: dict) -> str:
+        """「全部题目」里的一行（含操作列的三个按钮，一行排开）。
+
+        操作列从四个按钮减到三个：「查看题面」现在**跳到题目详情页**
+        （左边改、右边看，比弹窗看一眼睛信息多得多），「改题面」并进那一页
+        （同一件事不留两个入口），剩下「自己测试」「删除」。
+        """
+        pid = r["pid"]
+        esc = lambda s: html.escape(str(s), quote=True)             # noqa: E731
+        code = r["code"]
+        cases_cell = str(r["cases"]) if r["cases"] else '<span class="muted">—</span>'
+        if r["time_ms"] and r["memory_mb"]:
+            tl_text = (f"{r['time_ms'] / 1000:g} 秒 / {r['memory_mb']} MB"
+                       if r["time_ms"] % 1000 == 0 else
+                       f"{r['time_ms']} 毫秒 / {r['memory_mb']} MB")
+            tl_hover = ""
+        else:
+            # 这一格以前写「—（没记下，自己测试时看用时）」，太长把表格顶宽了；
+            # 提示挪到 title 里，格子本身只留一个短横。
+            tl_text = "—"
+            tl_hover = "建题时没记下，点「自己测试」跑一遍就知道实际用时"
+        sample_cell = (f'<span class="ok">有</span> <span class="muted">{r["sample_groups"]} 组</span>'
+                       if r["sample_groups"] else '<span class="muted">—</span>')
+        use_note = ("　<span class=\"muted\">用在本场：" + "、".join(used[pid][:2]) + "</span>"
+                    if used.get(pid) else "")
+        # 表格不出现横向滚动条，靠 CSS 按列限宽 + 省略号截断；截掉的部分写在 title 里，
+        # 鼠标悬停能看全（老师要认题，不能把标题截得看不出来是哪道）。
+        title_txt = str(r["title"] or "")
+        hover = " · ".join(x for x in (title_txt, use_note and
+                                       "用在本场：" + "、".join(used[pid])) if x)
+        ops = (f'<div class="prob-ops">'
+               f'<a class="btn btn-sm btn-gray" href="{problem_detail_url(key, pid)}">查看题面</a>'
+               f'<button type="button" class="btn btn-sm" data-test="{esc(pid)}">自己测试</button>'
+               f'<button type="button" class="btn btn-sm btn-danger" data-del="{esc(pid)}" '
+               f'data-title="{esc(title_txt or pid)}">删除</button>'
+               f'</div>')
+        return (f'<tr><td><b>{html.escape(code) if code else "—"}</b></td>'
+                f'<td title="{esc(r["name"])}"><code>{html.escape(r["name"])}</code></td>'
+                f'<td title="{esc(hover)}">{html.escape(title_txt)}{use_note}</td>'
+                f'<td>{cases_cell}</td>'
+                f'<td class="muted" title="{esc(tl_hover)}">{tl_text}</td>'
+                f'<td>{sample_cell}</td>'
+                f'<td>{ops}</td></tr>')
+
+    def _deleted_row_html(self, key: str, g: dict) -> str:
+        """「已删除的题目」里的一行（看题面 / 恢复 / 彻底删除）。"""
+        esc = lambda s: html.escape(str(s), quote=True)             # noqa: E731
+        ops = (f'<div class="prob-ops">'
+               f'<a class="btn btn-sm btn-gray" href="{problem_detail_url(key, g["pid"])}">查看题面</a>'
+               f'<button type="button" class="btn btn-sm" data-restore="{esc(g["pid"])}">恢复</button>'
+               f'<button type="button" class="btn btn-sm btn-danger" data-purge="{esc(g["pid"])}" '
+               f'data-title="{esc(g["title"] or g["pid"])}">彻底删除</button>'
+               f'</div>')
+        return (f'<tr><td><b>{html.escape(str(g["code"]) or "—")}</b></td>'
+                f'<td class="muted">{html.escape(str(g["name"]))}</td>'
+                f'<td>{html.escape(str(g["title"]))}</td>'
+                f'<td class="muted">{html.escape(g["deleted_at"] or "")}</td>'
+                f'<td>{ops}</td></tr>')
+
+    def _deleted_block_html(self, key: str, gone: list, open_: bool = False) -> str:
+        """「已删除的题目」那一整块（`<details>` 连同表格）。
+
+        平时收起（`<details>`），有内容才出现；假删除的题仍然能看题面。
+        `open_=True` 给删除/恢复的 AJAX 回包用：刚删完就得让人看见它去哪了，
+        不然页面上"少了一行"会以为是删没了。
+        """
+        if not gone:
+            return ('<div id="prob-del" class="muted" style="margin-top:14px">'
+                    '（没有已删除的题目）</div>')
+        rows = "".join(self._deleted_row_html(key, g) for g in gone)
+        return (
+            f'<details id="prob-del" style="margin-top:14px"' + (" open" if open_ else "") + '>'
+            f'<summary style="cursor:pointer"><b>已删除的题目（{len(gone)} 道）</b>'
+            f'<span class="muted"> —— 只是从上面的列表里收起来了：题面、历史提交记录都还在，'
+            f'可以恢复或彻底删除。<b>这些题不再影响建题</b>：同一个标识再建一次会建出一份新的'
+            f'（内部换个标识，两份互不影响）</span></summary>'
+            f'<div class="card" style="overflow:auto;margin-top:8px">'
+            f'<table><tr><th>题目编号</th><th>英文名</th><th>标题</th><th>删除时间</th><th>操作</th></tr>'
+            f'<tbody id="prob-del-rows">{rows}</tbody></table></div></details>')
+
+    def _finish_problem_action(self, key: str, msg: str, *, ok: bool = True) -> None:
+        """删除 / 恢复 / 彻底删除的收尾：网页表单跳转，前端 fetch 拿 JSON。
+
+        走 JSON 时**把两张表的 HTML 一起回给前端**（行还是服务端渲染的，只有一处逻辑），
+        前端只换表格内容：页面不跳、滚动位置不丢 —— 老师点了删除还站在原地看着那一行消失，
+        而不是被弹回页面顶部（这一版专门改的就是这个）。
+        """
+        if not getattr(self, "_want_json", False):
+            self._redirect(admin_url(key, path="/admin/problems", msg=msg))
+            return
+        _, rows, gone, used, _err = self._catalog_view()
+        self._json({
+            "ok": ok, "message": msg, "error": "" if ok else msg,
+            "rows": "".join(self._problem_row_html(key, r, used) for r in rows),
+            "deleted_html": self._deleted_block_html(key, gone, open_=True),
+            "live_count": len(rows), "gone_count": len(gone),
+        })
+
     def _admin_problems(self, q: dict):
         """题目列表（新页）：题库里全部题目 + 查看题面 + 自己测试。
 
@@ -2021,126 +2538,42 @@ class AdminPages:
         if not self._check_admin(key):
             self._admin_login()
             return
-        rows_all, err = self._catalog_rows()
-        # 假删除的题从「全部题目」里收起来，单独列在下面（题面/提交记录都还在）
-        rows = [r for r in rows_all if not r.get("deleted")]
-        gone = [r for r in rows_all if r.get("deleted")]
-        # 场上正在用的题目（哪场比赛配了它）——表格里标一下「用在本场」，老师一眼知道哪些题在用
-        used: dict[str, list[str]] = {}
-        for c in store.list_contests():
-            for p in store.load_exam(c["id"]).get("problems", []):
-                used.setdefault(str(p.get("pid") or ""), []).append(
-                    f'第 {p.get("no")} 题·{c["title"]}')
+        rows_all, rows, gone, used, err = self._catalog_view()
         # 题面**不在页面加载时取**（题库几十道题时，一次查几十条数据库太慢）：
-        # 点「查看题面」时才去缓存/评测站取，取过一次缓存 6 小时（见 _admin_scan 的 render 分支）。
+        # 「查看题面」现在直接跳到题目详情页，题面在那页里读（一页只读一道题）。
+        # `cand` 给页面里的「自己测试」弹窗用（标程要跟着弹窗预填）。
         cand = {}
-        # 已删除的也算进来：它们那一行的「查看题面」按钮同样要能打开（题面本来就还在）
         for r in rows_all:
             cand[r["pid"]] = {"code": r["code"], "name": r["name"], "title": r["title"],
                               "cases": r["cases"], "full": 100, "std": r["std"]}
-        table_rows = []
-        for r in rows:
-            pid = r["pid"]
-            code = r["code"]
-            if r["cases"]:
-                cases_cell = str(r["cases"])
-            else:
-                cases_cell = '<span class="muted">—</span>'
-            if r["time_ms"] and r["memory_mb"]:
-                tl_text = (f"{r['time_ms'] / 1000:g} 秒 / {r['memory_mb']} MB"
-                           if r["time_ms"] % 1000 == 0 else
-                           f"{r['time_ms']} 毫秒 / {r['memory_mb']} MB")
-                tl_hover = ""
-            else:
-                # 这一格以前写「—（没记下，自己测试时看用时）」，太长把表格顶宽了；
-                # 提示挪到 title 里，格子本身只留一个短横。
-                tl_text = "—"
-                tl_hover = "建题时没记下，点「自己测试」跑一遍就知道实际用时"
-            if r["sample_groups"]:
-                sample_cell = (f'<span class="ok">有</span> '
-                               f'<span class="muted">{r["sample_groups"]} 组</span>')
-            else:
-                sample_cell = '<span class="muted">—</span>'
-            use_note = ("　<span class=\"muted\">用在本场：" + "、".join(used[pid][:2]) + "</span>"
-                        if used.get(pid) else "")
-            # 表格不出现横向滚动条，靠 CSS 按列限宽 + 省略号截断；截掉的部分写在 title 里，
-            # 鼠标悬停能看全（老师要认题，不能把标题截得看不出来是哪道）。
-            title_txt = str(r["title"] or "")
-            hover = " · ".join(x for x in (title_txt, use_note and
-                                           "用在本场：" + "、".join(used[pid])) if x)
-            table_rows.append(
-                f'<tr><td><b>{html.escape(code) if code else "—"}</b></td>'
-                f'<td title="{html.escape(str(r["name"]), quote=True)}">'
-                f'<code>{html.escape(r["name"])}</code></td>'
-                f'<td title="{html.escape(hover, quote=True)}">{html.escape(title_txt)}{use_note}</td>'
-                f'<td>{cases_cell}</td>'
-                f'<td class="muted" title="{html.escape(tl_hover, quote=True)}">{tl_text}</td>'
-                f'<td>{sample_cell}</td>'
-                f'<td><button type="button" class="btn btn-sm btn-gray" data-view="{html.escape(pid, quote=True)}">'
-                f'查看题面</button> '
-                f'<a class="btn btn-sm btn-gray" href="{statement_url(key, pid)}">改题面</a> '
-                f'<button type="button" class="btn btn-sm" data-test="{html.escape(pid, quote=True)}">'
-                f'自己测试</button> '
-                f'<form method="post" action="/admin/problem{cid_query(key, "")}" style="display:inline" '
-                f'onsubmit="return confirm(\'确定删除题目 {html.escape(title_txt or pid, quote=True)}'
-                f'（{html.escape(pid, quote=True)}）？\\n只是从列表里收起来 —— '
-                f'题面和历史提交记录都还看得到，随时可以恢复。\')">'
-                f'<input type="hidden" name="action" value="delete">'
-                f'<input type="hidden" name="pid" value="{html.escape(pid, quote=True)}">'
-                f'<button type="submit" class="btn btn-sm btn-danger">删除</button></form></td></tr>')
-        # 「已删除的题目」那一块：平时收起（<details>），有内容才出现。
+        table_rows = [self._problem_row_html(key, r, used) for r in rows]
+        # 「已删除的题目」那一块：平时收起（`<details>`），有内容才出现。
         # 假删除的题仍然能看题面/自己测试（它们只是不在上面那张表里）。
-        gone_html = ""
-        if gone:
-            grows = "".join(
-                f'<tr><td><b>{html.escape(str(g["code"]) or "—")}</b></td>'
-                f'<td class="muted">{html.escape(str(g["name"]))}</td>'
-                f'<td>{html.escape(str(g["title"]))}</td>'
-                f'<td class="muted">{html.escape(g["deleted_at"] or "")}</td>'
-                f'<td><button type="button" class="btn btn-sm btn-gray" '
-                f'data-view="{html.escape(g["pid"], quote=True)}">查看题面</button> '
-                f'<a class="btn btn-sm btn-gray" href="{statement_url(key, g["pid"])}">改题面</a> '
-                f'<form method="post" action="/admin/problem{cid_query(key, "")}" style="display:inline">'
-                f'<input type="hidden" name="action" value="restore">'
-                f'<input type="hidden" name="pid" value="{html.escape(g["pid"], quote=True)}">'
-                f'<button type="submit" class="btn btn-sm">恢复</button></form> '
-                f'<form method="post" action="/admin/problem{cid_query(key, "")}" style="display:inline" '
-                f'onsubmit="return confirm(\'彻底删除 {html.escape(g["pid"], quote=True)}？\\n'
-                f'评测站上的题目、题目编号、题面缓存、大样例都会一起删掉，删了就找不回来了；'
-                f'历史提交记录里这道题会显示为已删除。\')">'
-                f'<input type="hidden" name="action" value="purge">'
-                f'<input type="hidden" name="pid" value="{html.escape(g["pid"], quote=True)}">'
-                f'<button type="submit" class="btn btn-sm btn-danger">彻底删除</button></form></td></tr>'
-                for g in gone)
-            gone_html = (
-                f'<details style="margin-top:14px"><summary style="cursor:pointer">'
-                f'<b>已删除的题目（{len(gone)} 道）</b>'
-                f'<span class="muted"> —— 只是从上面的列表里收起来了：题面、历史提交记录都还在，'
-                f'可以恢复或彻底删除。<b>这些题不再影响建题</b>：同一个标识再建一次会建出一份新的'
-                f'（内部换个标识，两份互不影响）</span></summary>'
-                f'<div class="card" style="overflow:auto;margin-top:8px">'
-                f'<table><tr><th>题目编号</th><th>英文名</th><th>标题</th><th>删除时间</th><th>操作</th></tr>'
-                f'{grows}</table></div></details>')
+        gone_html = self._deleted_block_html(key, gone)
         data = _js_json(cand)
         body = f"""
 {self._admin_nav(key)}
 <p class="muted">题库里的全部题目，一行一道。<b>题目编号</b>（<code>T00001</code>）是系统分配的，
  老师只用它定位这道题；<b>英文名</b>是学生在比赛里看到的名字（加进比赛时可以按场次再改）。
- 点「查看题面」看学生看到的样子，点「自己测试」拿代码跑一遍全部测试点，
- 确认数据与时限设置没问题。</p>
+ 点「查看题面」进这道题的<b>详情页</b>（左边 Markdown 原文可以直接改，右边就是学生看到的样子，
+ 同一页还能看标程）；点「自己测试」拿代码跑一遍全部测试点，确认数据与时限设置没问题。
+ 删除是**从列表里收起来**（题面、提交记录都留着），删完页面停在原地，不跳回顶部。</p>
 {"<p class='warn'>" + html.escape(err) + "（下面这份清单来自考试服务自己的记录）</p>" if err else ""}
 <p><a class="btn" href="{admin_url(key, path='/admin/problem')}">+ 新建题目</a>
    <button type="button" class="btn btn-gray" id="csp-refresh-cat">刷新题库清单</button>
    <span class="muted" id="csp-refresh-note"></span></p>
 
-<h2>全部题目（{len(rows)} 道）</h2>
+<h2>全部题目（<span id="prob-live-count">{len(rows)}</span> 道）</h2>
+<div id="prob-flash"></div>
 <div class="card">
 <table class="csp-prob-table">
-<tr><th style="width:8%">题目编号</th><th style="width:11%">英文名</th><th>标题</th>
-    <th style="width:7%">测试点</th><th style="width:10%">时限 / 内存</th>
-    <th style="width:7%">大样例</th><th style="width:26%">操作</th></tr>
+<tr><th style="width:7%">题目编号</th><th style="width:9%">英文名</th><th>标题</th>
+    <th style="width:6%">测试点</th><th style="width:9%">时限 / 内存</th>
+    <th style="width:6%">大样例</th><th style="width:23%">操作</th></tr>
+<tbody id="prob-rows">
 {"".join(table_rows) or '<tr><td colspan="7" class="muted">题库还是空的：点上面的「新建题目」，'
                         '选整个出题文件夹（或 zip）就能自动识别建题。</td></tr>'}
+</tbody>
 </table>
 </div>
 
@@ -2157,7 +2590,6 @@ class AdminPages:
 
 <p class="muted">「测试点 / 时限 / 内存」是建题时记下来的；更早建的题没有这份记录（显示「—」），
  跑一次「自己测试」就知道实际有多少个点、最慢的点占了多少时限。</p>
-{_view_modal()}
 {_test_modal()}
 <script>window.CSP_CAND = {data};</script>
 <script>window.CSP_KEY_QUERY = {json.dumps(cid_query(key, ""))};</script>
@@ -2183,6 +2615,305 @@ class AdminPages:
 </script>
 """
         self._send(page("题目列表", body, math=True))
+
+    def _admin_problem_detail(self, q: dict, flash: str = "", flash_kind: str = "ok"):
+        """题目详情页：**左边改、右边看**（左边 Markdown 原文，右边学生看到的成品）。
+
+        原型参考学生题面页 + 老「改题面」页；一页把"这道题到底是什么样"讲清楚，
+        不用在三个页面之间来回跳：
+
+          * 左边 —— 题目名 / 英文名 / 时限 / 内存 / 题面（Markdown，直接改）
+          * 右边 —— 学生视角渲染出来的题面（改一个字右边立刻跟着变）
+          * 下面 —— 标程（只读，可一键复制）、测试点数、大样例、用在哪儿场
+
+        顶部三个按钮「左右对照 / 只看编辑 / 只看成品」：小屏或者只想专心改题面时用，
+        选择记在浏览器里（localStorage），刷新后还是那个视图。
+        """
+        key = q.get("key", "")
+        if not self._check_admin(key):
+            self._admin_login()
+            return
+        esc = html.escape
+        back = (f'<p><a class="btn btn-gray" href="{admin_url(key, path="/admin/problems")}">'
+                f'← 题目列表</a></p>')
+        pid = (q.get("pid") or "").strip()
+        if not pid:
+            self._send(page("题目详情", self._admin_nav(key) + back +
+                            self._flash("err", "链接里没有 pid：不知道该看哪道题。")), 404)
+            return
+        rows_all, _rows, _gone, used, _err = self._catalog_view()
+        rec = next((r for r in rows_all if r["pid"] == pid), None)
+        if rec is None:
+            self._send(page("题目详情", self._admin_nav(key) + back +
+                            self._flash("err", f"题库里没有「{pid}」这道题。")), 404)
+            return
+        cache_dir = os.path.join(store.DATA_DIR, "statements")
+        text = localoj.problem_statement(pid) or self._statement_raw(pid, cache_dir)
+        title = str(rec.get("title") or pid)
+        code = str(rec.get("code") or "")
+        name = str(rec.get("name") or "")
+        cases = int(rec.get("cases") or 0)
+        groups = int(rec.get("sample_groups") or 0)
+        time_ms = int(rec.get("time_ms") or 0)
+        memory_mb = int(rec.get("memory_mb") or 0)
+        std = str(rec.get("std") or "")
+        used_txt = "、".join(used.get(pid) or []) or "还没用在任何一场比赛里"
+        std_html = (code_pre(std) if std else
+                    '<p class="muted">这道题没有存标程（建题时文件夹里没放 <code>标程.cpp</code>）。</p>')
+        render_html = (md_to_html(text) if text.strip()
+                       else '<p class="muted">（题面还是空的）</p>')
+        # 覆盖重传的地址（这个表单在 `pd-form` **外面** —— HTML 表单不能嵌套）
+        up_url = ("/admin/problem-reupload" + cid_query(key, "") +
+                  ("&" if cid_query(key, "") else "?") + "pid=" + urllib.parse.quote(pid))
+        limit_txt = (f"{time_ms / 1000:g} 秒 / {memory_mb} MB"
+                     if time_ms and memory_mb else "—")
+        kv = "".join(
+            f'<div><b>{esc(k)}</b>{v}</div>' for k, v in [
+                ("题目编号", f'<code>{esc(code) or "—"}</code>'),
+                ("题库标识", f'<code>{esc(pid)}</code>'),
+                ("英文名", f'<code>{esc(name)}</code>' if name else '<span class="muted">没设</span>'),
+                ("测试点", f'{cases} 个' if cases else '<span class="muted">—</span>'),
+                ("大样例", f'{groups} 组' if groups else '<span class="muted">—</span>'),
+                ("时限 / 内存", esc(limit_txt)),
+                ("用在本场", esc(used_txt)),
+            ])
+        body = f"""
+{self._admin_nav(key)}
+{back}
+<h2 style="margin:6px 0 2px">{esc(title)}</h2>
+<p class="muted" style="margin:0 0 6px">题目编号 <b>{esc(code) or "—"}</b>
+   · 题库标识 <code>{esc(pid)}</code>
+   {"· 英文名 <code>" + esc(name) + "</code>" if name else ""}
+   · {esc(used_txt)}</p>
+{self._flash(flash_kind, flash) if flash else ""}
+
+<div class="pd-bar">
+  <span class="muted">视图：</span>
+  <button type="button" class="btn btn-sm btn-gray" data-pd-mode="both">左右对照</button>
+  <button type="button" class="btn btn-sm btn-gray" data-pd-mode="left">只看编辑</button>
+  <button type="button" class="btn btn-sm btn-gray" data-pd-mode="right">只看成品</button>
+  <button type="submit" form="pd-form" class="btn" style="margin-left:auto">保存修改</button>
+  <span class="muted" id="pd-note"></span>
+</div>
+
+<form id="pd-form" method="post" action="{problem_detail_url(key, pid)}">
+<input type="hidden" name="pid" value="{esc(pid)}">
+<div class="pd-wrap" id="pd-wrap" data-mode="both">
+  <div class="pd-left">
+    <div class="card">
+      <label>题目名（列表、成绩、比赛里显示的名字）</label>
+      <input type="text" name="title" value="{esc(title)}">
+      <label>英文名（学生看到的，如 <code>candy</code>；可以留空）</label>
+      <input type="text" name="name" value="{esc(name)}">
+      <div class="row">
+        <div style="flex:0 0 150px"><label>时限（毫秒）</label>
+          <input type="number" name="time_ms" min="100" step="100" value="{time_ms or ''}"></div>
+        <div style="flex:0 0 150px"><label>内存（MB）</label>
+          <input type="number" name="memory_mb" min="16" step="16" value="{memory_mb or ''}"></div>
+      </div>
+      <p class="muted" style="font-size:13px;margin:8px 0 2px">
+        时限 / 内存<b>真的会改变判题</b>（下一次提交就按新值跑）；英文名只在「这场比赛没单独设过」时生效。</p>
+      <label>题面（Markdown —— 左边写完，右边立刻就是学生看到的样子）</label>
+      <textarea class="codebox" id="pd-src" name="statement" spellcheck="false">{esc(text)}</textarea>
+      <p class="row" style="margin:10px 0 0">
+        <button type="submit" class="btn">保存修改</button>
+        <span class="muted">Ctrl+S 也能存 · Tab 缩进 4 格 · 保存后学生端立刻生效</span>
+      </p>
+    </div>
+    <div class="card">
+      <details {"open" if std else ""}><summary style="cursor:pointer">
+        <b>标程</b> <span class="muted">（只读；右上角「复制」可一键拿走）</span></summary>
+        {std_html}</details>
+      <details style="margin-top:8px"><summary style="cursor:pointer">
+        <b>这道题的信息</b></summary><div class="kv" style="margin-top:8px">{kv}</div></details>
+    </div>
+  </div>
+  <div class="pd-right">
+    <div class="card">
+      <div class="stmt" id="pd-render">{render_html}</div>
+    </div>
+  </div>
+</div>
+</form>
+<p class="muted">上面右边那块就是学生在考试页点开题面看到的样子（公式会真的渲染出来）。
+ 保存只动题面与这几个字段 —— <b>测试数据、标程不变</b>。</p>
+
+<div class="card">
+  <h3 style="margin-top:0">重新上传题目文件夹（覆盖这道题）</h3>
+  <p class="muted">规范与「新建题目」完全一样：文件夹名写成 <code>分类号-题名</code>
+    （<b>题名取文件夹名</b>，和建题一致），里面放 <code>题目.md</code>（学生看到的题面）、
+    <code>标程.cpp</code>、<code>data/01.in</code> + <code>01.out</code>（成对）、<code>大样例/</code>。
+    传完这道题<b>按文件夹重做一遍</b>：题名、题面、标程、测试数据、大样例都换成文件夹里的；
+    <b>题目编号不变</b>（现在是 <code>{html.escape(code) or "—"}</code>），
+    <b>英文名 / 时限 / 内存保持原值</b>。立刻生效 —— 学生端题面、判题用的数据都是新的一份。</p>
+  <form method="post" action="{up_url}" enctype="multipart/form-data" id="pd-up">
+    <input type="file" name="folder" id="pd-up-files" webkitdirectory directory multiple>
+    <p style="margin:10px 0 0">
+      <button type="submit" class="btn btn-danger" id="pd-up-go">上传并覆盖</button>
+      <span class="muted" id="pd-up-note">　还没有选文件夹（点左边的「选择文件」选整道题的文件夹）</span>
+    </p>
+  </form>
+</div>
+<script>
+(function () {{
+  var inp = document.getElementById('pd-up-files');
+  var note = document.getElementById('pd-up-note');
+  var form = document.getElementById('pd-up');
+  if (!inp || !note || !form) return;
+  inp.addEventListener('change', function () {{
+    var fs = this.files || [];
+    var top = fs.length ? String(fs[0].webkitRelativePath || '').split('/')[0] : '';
+    note.textContent = fs.length
+      ? ('　选好了：' + top + '（' + fs.length + ' 个文件）')
+      : '　还没有选文件夹';
+  }});
+  form.addEventListener('submit', function (e) {{
+    if (!inp.files || !inp.files.length) {{
+      e.preventDefault();
+      note.textContent = '　先选一个题目文件夹再点上传';
+      return;
+    }}
+    if (!confirm('会用这个文件夹覆盖当前题目：题面、标程、测试数据、大样例都换成文件夹里的。\\n'
+                 + '题目编号不变，英文名 / 时限 / 内存也不变。确定上传？')) e.preventDefault();
+  }});
+}})();
+</script>
+<script>window.CSP_KEY_QUERY = {json.dumps(cid_query(key, ""))};</script>
+{PROBLEM_DETAIL_JS}
+"""
+        self._send(page(f"题目详情 · {title}", body, math=True))
+    def _admin_problem_reupload(self):
+        """重传整个出题文件夹，**覆盖**已有题目（题目详情页那个入口）。
+
+        与「新建题目」同一套规范（`题目.md` / `标程.cpp` / `data/01.in|out` / `大样例/`），
+        只差两点：
+
+          * 表单带 `pid` → 覆盖**这道**题，**题目编号不变**（编号跟着题走，
+            `assign_number()` 对已有编号是沿用的）；
+          * 覆盖是这次的目的，所以 `create_problem(..., overwrite=True)`
+            （新建题目那边仍然是"不覆盖、自动让位"，免得误撞已有的题）。
+
+        文件夹会换掉的：题名（取 `题目.md` 的一级标题）、题面、标程、测试数据、大样例。
+        不会被文件夹动的：**英文名**（`problem_info` 里那个默认名）、**时限 / 内存**
+        —— 文件夹里没有这两样，所以把原值传回去，免得被默认的 1000 / 256 悄悄冲掉。
+        """
+        q = self._query()
+        key = q.get("key", "")
+        if not self._check_admin(key):
+            self._json({"ok": False, "error": "管理密钥不正确"}, 403)
+            return
+        pid = (q.get("pid") or "").strip()
+        if not pid:
+            self._redirect(admin_url(key, path="/admin/problems", msg="没有指定要覆盖哪道题。"))
+            return
+        if make_problem is None:
+            self._redirect(problem_detail_url(key, pid, msg="服务端缺少建题模块，覆盖不了。"))
+            return
+        try:
+            fields, files, file_fields = self._parse_multipart(MAX_PS_UPLOAD)
+        except ValueError as e:
+            self._redirect(problem_detail_url(key, pid, msg=f"上传失败：{e}"))
+            return
+        # 认**表单字段名**（folder / data），别认文件名 —— 中文文件名经 multipart 传输
+        # 可能被编码搞乱（建题那边踩过：标程被当成测试数据丢掉）
+        uploads = {fn: files[fn] for fn, field in file_fields.items() if field in ("folder", "data")}
+        if not uploads:
+            self._redirect(problem_detail_url(key, pid, msg=(
+                "没有收到文件：请选**整个出题文件夹**（里面有 题目.md、标程.cpp、data/、大样例/），"
+                "或者选成对的 .in/.out。")))
+            return
+        std = ""
+        for fn, field in file_fields.items():
+            if field == "std":
+                std = files[fn].decode("utf-8", "replace")
+        old = load_problem_info().get(pid) or {}
+        old_code = str(old.get("code") or "") or make_problem.code_of_pid(pid) or ""
+        # 注意：`time_ms` / `memory_mb` 传**原值**（没有就退回默认）—— 文件夹里没有这两样，
+        # 不传的话 `create_problem` 会用默认值把它们改掉（老师没提时限却被改了，很坏）。
+        rep = make_problem.create_problem(
+            pid, "", uploads, overwrite=True,
+            time_ms=int(old.get("time_ms") or 0) or make_problem.DEFAULT_TIME_MS,
+            memory_mb=int(old.get("memory_mb") or 0) or make_problem.DEFAULT_MEMORY_MB,
+            std_source=std)
+        if not rep.get("ok"):
+            log(f"[管理端] 覆盖重传 {pid} 失败：{rep.get('error')}")
+            extra = "；" + "，".join(str(x) for x in (rep.get("problems") or [])[:3]) \
+                if rep.get("problems") else ""
+            self._redirect(problem_detail_url(key, pid, msg=(
+                f"覆盖失败：{rep.get('error', '未知错误')}{extra}（这道题没有改动）")))
+            return
+        try:
+            store.save_catalog(localoj.list_problems())
+        except (hydro.HydroError, OSError) as e:                 # noqa: BLE001
+            log(f"[管理端] 覆盖重传 {pid}：刷新题库缓存失败 {e!r}")
+        # 元信息也要按新的记一遍（题目名 / 测试点数 / 标程）——「题目列表」和题目详情页
+        # 里的"测试点 N 个、标程、题目名"读的都是 `problem_info.json`，
+        # 只在建题那条路上记过；覆盖重传不记的话，列表里还显示旧的题名与点数（踩过）。
+        remember_problem(pid, title=str(rep.get("title") or ""),
+                         code=str(rep.get("number") or ""), cases=rep.get("cases"),
+                         time_ms=int(old.get("time_ms") or 0) or None,
+                         memory_mb=int(old.get("memory_mb") or 0) or None,
+                         std=std)
+        # 题面字数**读刚落盘的那份**：`create_problem` 的报告里没有题面字段，
+        # 拿它报"0 字"会让老师以为题面没传上（踩过）
+        try:
+            stmt_len = len(localoj.problem_statement(pid) or "")
+        except Exception:                                        # noqa: BLE001
+            stmt_len = 0
+        n_std = len(std)
+        log(f"[管理端] 覆盖重传 {pid}：{rep.get('cases')} 组数据、题面 {stmt_len} 字、标程 {n_std} 字")
+        self._redirect(problem_detail_url(key, pid, msg=(
+            f"已用文件夹覆盖重传（{rep.get('title') or pid}）："
+            f"{rep.get('cases')} 组测试数据、题面 {stmt_len} 字"
+            + (f"、标程 {n_std} 字" if n_std else "")
+            + f"；题目编号仍是 {old_code or '（没变）'}，英文名 / 时限 / 内存保持原值。"
+            f"学生端题面和判题数据**立刻**是新的一份。")))
+
+    def _admin_problem_detail_post(self):
+        """保存题目详情页的改动：**题面 + 题目名 + 英文名 + 时限 + 内存**。
+
+        分两处落盘：题面写 `data/statements/<pid>.md`（`localoj.set_problem_statement`），
+        题目名/英文名/时限/内存写编号登记与题目信息（`remember_meta`）。
+        任何一处失败都**如实报出来**（绝不说"保存好了"）—— 老师要靠这句话判断能不能走开。
+        """
+        q = self._query()
+        key = q.get("key", "")
+        if not self._check_admin(key):
+            self._json({"ok": False, "error": "管理密钥不正确"}, 403)
+            return
+        form = self._form()
+        pid = (q.get("pid") or form.get("pid") or "").strip()
+        if not pid:
+            self._redirect(admin_url(key, path="/admin/problems", msg="没有指定要改哪道题。"))
+            return
+        title = (form.get("title") or "").strip()
+        name = (form.get("name") or "").strip()
+        statement = form.get("statement") or ""
+        r = localoj.set_problem_statement(pid, statement)
+        if not r.get("ok"):
+            log(f"[管理端] 题目详情：保存题面失败 {pid}：{r.get('error')}")
+            self._redirect(problem_detail_url(key, pid, msg=(
+                f"题面没保存：{r.get('error')}。"
+                f"（题目名 / 时限这些也一起没动，改完再存一次就行。）")))
+            return
+        m = remember_meta(pid, title=title, name=name,
+                          time_ms=form.get("time_ms"), memory_mb=form.get("memory_mb"))
+        changed = [x for x in (m.get("changed") or []) if x]
+        skipped = [x for x in (m.get("skipped") or []) if x]
+        log(f"[管理端] 题目详情保存 {pid}（{title or pid}）：题面 {len(statement)} 字"
+            + (f"，{ '、'.join(changed) }" if changed else "，其余字段没变")
+            + (f"；没写的：{ '、'.join(skipped) }" if skipped else "")
+            + ("" if m.get("ok") else f"（元信息没写成功：{m.get('error')}）"))
+        if not m.get("ok"):
+            self._redirect(problem_detail_url(key, pid, msg=(
+                f"题面存好了，但题目名 / 时限这些没写成功：{m.get('error')}。")))
+            return
+        parts = [f"保存好了（{title or pid}）：题面已更新"]
+        if changed:
+            parts.append("，" + "、".join(changed) + "也改了")
+        parts.append("。")
+        parts.append("；".join(skipped) + "。" if skipped else "学生端立刻是新的。")
+        self._redirect(problem_detail_url(key, pid, msg="".join(parts)))
 
     def _api_testcase(self, q: dict):
         """取某个测试点的详情（给提交详情页的悬浮窗用）。
@@ -3193,33 +3924,32 @@ class AdminPages:
         """
         pid = (pid or "").strip()
         if not pid:
-            self._redirect(admin_url(key, path="/admin/problems", msg="没有指定要删哪道题。"))
+            self._finish_problem_action(key, "没有指定要删哪道题。", ok=False)
             return
         used = self._problem_in_use(pid)
         if used:
-            self._redirect(admin_url(key, path="/admin/problems", msg=(
+            self._finish_problem_action(key, (
                 f"「{pid}」还在比赛里用着，不能删：{'、'.join(used)}。"
-                f"先从那些比赛里把它移除，再回来删。")))
+                f"先从那些比赛里把它移除，再回来删。"), ok=False)
             return
         title = str((load_problem_info().get(pid) or {}).get("title") or pid)
         self._set_problem_deleted(pid, True)
         log(f"[管理端] 假删除题目 {pid}（{title}）：题面/大样例/编号/评测站都保留")
-        self._redirect(admin_url(key, path="/admin/problems", msg=(
+        self._finish_problem_action(key, (
             f"已删除题目 {pid}（{title}）—— 只是从列表里收起来了："
             f"题面和历史提交记录都还看得到。要找回来，在下面「已删除的题目」里点「恢复」。"
-            f"这个标识不再挡建题：同一份文件夹再建一次会建出一份新的，两份互不影响。")))
+            f"这个标识不再挡建题：同一份文件夹再建一次会建出一份新的，两份互不影响。"))
 
     def _restore_problem(self, pid: str, key: str) -> None:
         """把假删除的题放回列表。题面/大样例/编号一直都在，所以恢复是瞬间的。"""
         pid = (pid or "").strip()
         if not pid:
-            self._redirect(admin_url(key, path="/admin/problems", msg="没有指定要恢复哪道题。"))
+            self._finish_problem_action(key, "没有指定要恢复哪道题。", ok=False)
             return
         self._set_problem_deleted(pid, False)
         title = str((load_problem_info().get(pid) or {}).get("title") or pid)
         log(f"[管理端] 恢复题目 {pid}（{title}）")
-        self._redirect(admin_url(key, path="/admin/problems",
-                                 msg=f"已恢复题目 {pid}（{title}），它回到「全部题目」里了。"))
+        self._finish_problem_action(key, f"已恢复题目 {pid}（{title}），它回到「全部题目」里了。")
 
     def _purge_problem(self, pid: str, key: str) -> None:
         """**彻底删除**：评测站题目 + 本地四处残留一起清 —— 这一步不可逆。
@@ -3236,13 +3966,13 @@ class AdminPages:
         """
         pid = (pid or "").strip()
         if not pid:
-            self._redirect(admin_url(key, path="/admin/problems", msg="没有指定要删哪道题。"))
+            self._finish_problem_action(key, "没有指定要删哪道题。", ok=False)
             return
         used = self._problem_in_use(pid)
         if used:
-            self._redirect(admin_url(key, path="/admin/problems", msg=(
+            self._finish_problem_action(key, (
                 f"「{pid}」还在比赛里用着，不能删：{'、'.join(used)}。"
-                f"先从那些比赛里把它移除，再回来删。")))
+                f"先从那些比赛里把它移除，再回来删。"), ok=False)
             return
         title = str((load_problem_info().get(pid) or {}).get("title") or pid)
         done, failed = [], []
@@ -3276,15 +4006,15 @@ class AdminPages:
             + (f"；**没删掉**：{'、'.join(failed)}" if failed else ""))
         if failed:
             # 本地删不干净（权限/占用之类）：如实说，别报"已彻底删除"
-            self._redirect(admin_url(key, path="/admin/problems", msg=(
+            self._finish_problem_action(key, (
                 f"「{pid}」（{title}）**没能删干净**：{'、'.join(failed)}。"
                 f"多半是文件被占用或权限不对，可以过一会儿再点一次「彻底删除」。"
-                f"（登记里的信息已经清掉了，所以它不会再出现在列表里。）")))
+                f"（登记里的信息已经清掉了，所以它不会再出现在列表里。）"), ok=False)
             return
-        self._redirect(admin_url(key, path="/admin/problems", msg=(
+        self._finish_problem_action(key, (
             f"已彻底删除题目 {pid}（{title}）" +
             (f"：{'、'.join(done)}。" if done else "：本地没有它的残留。") +
-            "题面与历史提交记录里这道题都会显示为已删除。")))
+            "题面与历史提交记录里这道题都会显示为已删除。"))
 
     def _admin_problem_post(self):
         q = self._query()
@@ -3303,10 +4033,14 @@ class AdminPages:
             act = form.get("action") or ""
             if act in ("delete", "restore", "purge"):
                 # delete = 假删除（题面/提交记录都留着）；restore = 放回列表；
-                # purge = 彻底删除（真删评测站上的题，慢）
+                # purge = 彻底删除（真删本机题目数据，慢）
+                # `json=1`（题目列表页的按钮走这条）：**只回 JSON + 两张表的 HTML**，
+                # 前端就地换表格 —— 页面不跳、滚动位置不丢。
+                self._want_json = q.get("json") == "1"
                 {"delete": self._delete_problem,
                  "restore": self._restore_problem,
                  "purge": self._purge_problem}[act](form.get("pid", ""), key)
+                self._want_json = False
                 return
             self._redirect(admin_url(key, path="/admin/problem",
                                      msg="这个地址用来上传出题文件夹（multipart 表单），"
