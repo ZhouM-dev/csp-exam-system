@@ -29,7 +29,7 @@ import time
 import urllib.parse
 import html
 
-from ..core import grading, hydro_client as hydro, localoj, store, wrapper
+from ..core import grading, localoj, store, wrapper, submissions
 from ..core.security import make_cookie
 from ..core import problems as make_problem
 from ..core.util import log, _fmt_bytes, _fmt_ms, _fmt_kb
@@ -83,14 +83,7 @@ def _deadline_ts(contest: dict) -> int:
         start = _ts(contest.get(key))
         if start:
             return start + minutes * 60
-    for key in _CREATED_FIELDS:
-        created = _ts(contest.get(key))
-        if not created:
-            continue
-        guess = created + minutes * 60
-        if guess > int(time.time()):              # 只在还没过去时用这个兜底
-            return guess
-        break
+    # 建赛时间不等于开考时间，不能用随时间失效的猜测来控制交卷。
     return 0
 
 
@@ -152,7 +145,7 @@ class StudentPages:
                                  contest)
                 return
             self._redirect(f"/hall?c={urllib.parse.quote(cid)}",
-                           cookie=f"csp={make_cookie(cid, kaohao)}; Path=/; Max-Age=43200")
+                           cookie=f"csp={make_cookie(cid, kaohao)}; Path=/; Max-Age=43200; HttpOnly; SameSite=Lax")
             return
         # 没带考试 id：按考号找考场
         hits = store.find_contests_of_kaohao(kaohao)
@@ -171,7 +164,7 @@ class StudentPages:
             return
         c = hits[0]
         self._redirect(f"/hall?c={urllib.parse.quote(c['id'])}",
-                       cookie=f"csp={make_cookie(c['id'], kaohao)}; Path=/; Max-Age=43200")
+                       cookie=f"csp={make_cookie(c['id'], kaohao)}; Path=/; Max-Age=43200; HttpOnly; SameSite=Lax")
 
     def _contests_page(self, kaohao: str, error: str = ""):
         """这个考号出现在哪些考场（考号按场次随机分配，通常只有一场）。"""
@@ -192,7 +185,7 @@ class StudentPages:
             # 公布成绩之前只说交没交；公布之后才给分数（三种赛制一视同仁）
             state = "已提交" if res else "未提交"
             if res and store.load_exam(c["id"]).get("released"):
-                state = f"{store.entry_total(res)} 分"
+                state = f"{store.entry_total(res, c['id'])} 分"
             rows.append(
                 f'<tr><td>{html.escape(c["title"])}</td><td>{rule_badge(c)}</td>'
                 f'<td>{level_badge(c)}</td>'
@@ -226,6 +219,7 @@ class StudentPages:
             bits.append(extra)
         if cid:
             bits.append(f'<a href="/score?c={q}">查成绩</a>')
+            bits.append(f'<a href="/scoreboard?c={q}">排行榜</a>')
         bits.append(f'<a href="/help{"?c=" + q if q else ""}">考生须知</a>')
         bits.append('<a href="/logout">退出</a>')
         return f'<p class="muted">{" · ".join(bits)}</p>'
@@ -272,7 +266,7 @@ class StudentPages:
                 # （踩过：页面上直接显示出了 `<a href=...>` 这串字面量）。分两条拼。
                 score_url = (f'/score?c={urllib.parse.quote(cid)}'
                              f'&kaohao={urllib.parse.quote(kaohao)}')
-                body.append(self._flash("info", f"你的总分 {store.entry_total(result)} 分。")
+                body.append(self._flash("info", f"你的总分 {store.entry_total(result, cid)} 分。")
                             + f'<p style="margin:-2px 0 6px">'
                               f'<a class="btn btn-sm btn-gray" href="{score_url}">'
                               f'看逐题得分 →</a></p>')
@@ -536,6 +530,15 @@ class StudentPages:
         session = self._session()
         if not cid and session:
             cid = session[0]
+        if not cid:
+            if os.path.isfile(NOTICE_DOC):
+                with open(NOTICE_DOC, encoding="utf-8") as notice:
+                    body = '<div class="card stmt">' + md_to_html(notice.read()) + '</div>'
+            else:
+                body = self._flash("info", "考生须知请以考点下发的通告为准。")
+            body = '<p><a class="btn btn-gray" href="/">返回考试入口</a></p>' + body
+            self._send(page("考生须知", body))
+            return
         contest = store.get_contest(cid) if cid else None
         if not contest:
             self._send(page("没有这场考试",
@@ -610,72 +613,62 @@ class StudentPages:
         self._redirect(f"/hall?c={urllib.parse.quote(cid)}" if cid else "/")
 
     def _do_upload(self):
-        q = self._query()
-        cid = q.get("c", "")
+        cid = self._query().get("c", "")
         kaohao = self._student(cid)
-        if not kaohao:
-            self._redirect(f"/enter?c={urllib.parse.quote(cid)}" if cid else "/")
+        if not kaohao or kaohao not in store.load_roster(cid):
+            self._redirect(f"/enter?c={urllib.parse.quote(cid)}&again=1")
             return
         contest = store.get_contest(cid)
         exam = store.load_exam(cid)
         if not contest:
             self._send(page("无法提交", self._flash("err", "比赛不存在。")), 400)
             return
-        if not contest.get("open", True):
-            self._send(page(contest["title"], self._flash("err", "本场比赛已关闭提交。")))
+        deadline = _deadline_ts(contest)
+        if not contest.get("open", True) or (deadline and int(time.time()) >= deadline):
+            self._send(page("无法提交", self._flash("err", "本场比赛已结束或关闭提交。")), 403)
             return
-
+        reserved = False
         try:
-            files = self._read_upload()
-        except ValueError as e:
-            self._send(page("提交失败", self._flash("err", str(e)) +
-                            f'<p><a href="/hall?c={cid}">返回重试</a></p>'), 400)
+            files = submissions.clean_files(self._read_upload())
+            if not files:
+                raise ValueError("没有收到文件，请重新选择文件夹。")
+            picked, missing = wrapper.pick_sources(
+                list(files), exam.get("problems", []),
+                student_name=store.student_name(cid, kaohao), strict=True,
+                strict_layout=store.rule_of(contest).get("freopen", False), kaohao=kaohao)
+            if not grading.reserve_submission():
+                raise ValueError("评测队列已满，请稍后再提交。")
+            reserved = True
+            with store._LOCK:
+                current = store.get_contest(cid)
+                end = _deadline_ts(current) if current else 0
+                if (not current or not current.get("open", True)
+                        or (end and int(time.time()) >= end)
+                        or kaohao not in store.load_roster(cid)):
+                    raise ValueError("比赛已结束或考号已失效，无法交卷。")
+                sid, snapshot = submissions.archive(cid, kaohao, files)
+                snapshot_picked = {k: f"{snapshot}/{v}" for k, v in picked.items()}
+                result = store.load_results(cid).get(kaohao, {})
+                # IOI 的未知历史最高分不能由一次新交卷消除；补交后仍需重测核验。
+                if not store.rule_of(contest).get("best_of"):
+                    result.pop("rejudge_error", None)
+                result.pop("rejudge_best_unverified", None)
+                result.pop("rejudge_proof", None)
+                result.update({"submission_exam": {"problems": [dict(p) for p in exam.get("problems", [])]},
+                               "judge_rule": dict(store.rule_of(contest)), "picked": {str(k): v for k, v in snapshot_picked.items()},
+                               "missing_sources": missing, "submission_id": sid,
+                               "submission_state": "queued", "judging": True,
+                               "rejudge": False,
+                               "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                               "problems": result.get("problems", {})})
+                store.put_result(cid, kaohao, result)
+            reserved = False
+            grading.enqueue_submission(cid, kaohao, snapshot_picked, exam, sid, reserved=True)
+        except (ValueError, OSError) as e:
+            if reserved:
+                grading.release_submission()
+            self._send(page("提交失败", self._flash("err", str(e))), 400)
             return
-        if not files:
-            self._send(page("提交失败", self._flash("err", "没有收到文件，请重新选择文件夹。") +
-                            f'<p><a href="/hall?c={cid}">返回重试</a></p>'), 400)
-            return
-
-        base = store.upload_dir(cid, kaohao)
-        if os.path.isdir(base):
-            for root, dirs, fns in os.walk(base, topdown=False):
-                for fn in fns:
-                    try:
-                        os.remove(os.path.join(root, fn))
-                    except OSError:
-                        pass
-                for d in dirs:
-                    try:
-                        os.rmdir(os.path.join(root, d))
-                    except OSError:
-                        pass
-        for rel, data in files.items():
-            safe = os.path.normpath(rel).replace("\\", "/").lstrip("/")
-            if ".." in safe.split("/"):
-                continue
-            dst = os.path.join(base, safe)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with open(dst, "wb") as f:
-                f.write(data)
-
-        # 不做目录结构校验：尽量宽松地把文件对上题目，找不到就当作这道题没交（自然是 0 分）。
-        # 个人信息文件与大小写都在 core/wrapper 里判：一律严格区分大小写（贴近真实考场）。
-        picked, missing = wrapper.pick_sources(
-            list(files.keys()), exam.get("problems", []),
-            student_name=store.student_name(cid, kaohao),
-            strict=True)
-        result = store.load_results(cid).get(kaohao, {})
-        result.update({
-            "picked": {str(k): v for k, v in picked.items()},
-            "missing_sources": missing,
-            "submitted_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "problems": result.get("problems", {}),
-            "judging": False,
-        })
-        store.put_result(cid, kaohao, result)
-        log(f"[{cid}/{kaohao}] 收到 {len(files)} 个文件，匹配到 {len(picked)} 道题，开始判分")
-        # 判分照常跑（老师要看成绩），只是学生端在老师公布成绩之前看不到
-        threading.Thread(target=grading.safe_judge_csp, args=(cid, kaohao, picked, exam), daemon=True).start()
         self._receipt_page(kaohao, contest, cid, files, picked, missing)
 
     def _serve_submit_file(self, cid: str, kaohao: str, rel: str, *,
@@ -684,13 +677,14 @@ class StudentPages:
 
         rel 是相对 uploads/<考号>/ 的路径；会做路径校验，不允许跳出该目录。
         """
-        rel = urllib.parse.unquote(rel or "").replace("\\", "/").lstrip("/")
+        rel = urllib.parse.unquote(rel or "").replace("\\", "/")
         base = store.upload_dir(cid, kaohao)
-        safe = os.path.normpath(rel)
-        if not rel or safe.startswith("..") or os.path.isabs(safe):
+        try:
+            path = submissions.confined_file(base, rel)
+            safe = rel
+        except ValueError:
             self._send(page("文件不存在", self._flash("err", "文件路径不对。")), 400)
             return
-        path = os.path.join(base, safe)
         if not os.path.isfile(path):
             self._send(page("文件不存在",
                             self._flash("err", f"服务器上没有这个文件：{safe}")), 404)
@@ -749,11 +743,18 @@ class StudentPages:
     def _read_upload(self) -> dict[str, bytes]:
         fields, files, _file_fields = self._parse_multipart(MAX_UPLOAD)
         out: dict[str, bytes] = {}
+        used = 0
         for name, data in files.items():
             if name.lower().endswith(".zip"):
-                out.update(_read_zip(data))
+                expanded = _read_zip(data, max_bytes=MAX_UPLOAD - used)
             else:
-                out[name.replace("\\", "/")] = data
+                expanded = {name.replace("\\", "/"): data}
+            if set(out).intersection(expanded):
+                raise ValueError("提交中包含重复文件名。")
+            used += sum(len(v) for v in expanded.values())
+            if used > MAX_UPLOAD:
+                raise ValueError("解压后的总大小超过上传上限。")
+            out.update(expanded)
         return out
 
     def _score_query_page(self, kaohao_input: str, contest: dict | None = None, cid: str = ""):
@@ -788,7 +789,7 @@ class StudentPages:
                     for p in exam.get("problems", []))
                 out.append(f'<div class="card"><p><b>{html.escape(store.student_name(cid, k))}</b>（{k}）</p>'
                            f'<table><tr><th>题目</th><th>得分</th></tr>{rows}</table>'
-                           f'<p style="font-size:20px;margin-top:12px"><b>总分：{store.entry_total(res)}</b></p></div>')
+                           f'<p style="font-size:20px;margin-top:12px"><b>总分：{store.entry_total(res, cid)}</b></p></div>')
                 # 逐点明细 + 自己交的代码：**只给本人**（别人的代码不互相看）
                 if k == (self._student(cid) or ""):
                     out.append(self._my_detail_html(cid, exam, k, res))

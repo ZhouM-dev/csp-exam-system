@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import ThreadingMixIn
 
 from ..core import store
-from ..config import JUDGE_SLOTS
+from ..config import JUDGE_SLOTS, MAX_UPLOAD
 from ..core.util import log
 from ..config import PORT, PS_DOC, PS_JOBS, PS_JOBS_LOCK
 from ..core.security import (ADMIN_COOKIE, make_admin_cookie, parse_admin_cookie,
@@ -36,6 +36,21 @@ from .admin_pages import AdminPages
 
 class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
     """请求入口：会话/表单/JSON 这些基础工具在这里，具体页面见两个 mixin。"""
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(30)
+
+    def _request_size(self, max_bytes):
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError as e:
+            raise ValueError("请求长度无效。") from e
+        if n > max_bytes:
+            raise ValueError(f"提交内容太大（{n // 1048576}MB），上限 {max_bytes // 1048576}MB。")
+        if n < 0 or self.headers.get("Transfer-Encoding"):
+            raise ValueError("请求长度超限或传输格式不受支持。")
+        return n
 
     def _cors_headers(self) -> None:
         """跨源请求（本机的出题工具 `file://` 页面）要用的响应头。
@@ -60,6 +75,8 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "same-origin")
         self._cors_headers()
         if cookie:
             self.send_header("Set-Cookie", cookie)
@@ -80,6 +97,7 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
         self._cors_headers()
         self.end_headers()
         self.wfile.write(data)
@@ -145,7 +163,7 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         return {k: v[0] for k, v in urllib.parse.parse_qs(q).items()}
 
     def _form(self) -> dict:
-        n = int(self.headers.get("Content-Length") or 0)
+        n = self._request_size(MAX_UPLOAD)
         body = self.rfile.read(n).decode("utf-8", "replace")
         return {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
 
@@ -167,9 +185,7 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         一个都认不出来。所以这里按 boundary 切字节，文件名用 UTF-8 解。
         """
         ctype = self.headers.get("Content-Type", "")
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > max_bytes:
-            raise ValueError(f"提交内容太大（{n // 1048576}MB），上限 {max_bytes // 1048576}MB。")
+        n = self._request_size(max_bytes)
         if "multipart/form-data" not in ctype:
             raise ValueError("提交格式不对（不是 multipart/form-data）。")
         raw = self.rfile.read(n)
@@ -209,6 +225,8 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             if fm_bytes is not None:
                 fn = _decode_name(fm_bytes)
                 if fn:
+                    if fn in files:
+                        raise ValueError("表单包含重复文件名。")
                     files[fn] = body
                     if field:
                         file_fields[fn] = field
@@ -235,6 +253,8 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             self._route_post()
+        except ValueError as e:
+            self._send(page("请求无效", self._flash("err", str(e))), 400)
         except Exception:
             log("处理 POST 出错：\n" + traceback.format_exc())
             self._send(page("出错了", self._flash("err", "服务器内部错误，请稍后重试。")), 500)
@@ -250,6 +270,14 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"ok")
             return
+        if path == "/admin/login":
+            from .scoreboard import login_route; return login_route(self, q)
+        if path in ("/scoreboard", "/admin/scoreboard", "/api/scoreboard"):
+            from .scoreboard import route
+            return route(self, q, path)
+        if path == "/admin/judge":
+            from .judge_settings import route
+            return route(self, q)
 
         # ---- 题单导入接口
         if path == "/api/problemset/report":
@@ -268,7 +296,7 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             cid = q.get("c", "")
             cookie = ""
             if q.get("key"):        # 带密钥进来过一次就记住，之后从站内链接进无需再带
-                cookie = f"{ADMIN_COOKIE}={make_admin_cookie()}; Path=/; Max-Age=2592000"
+                cookie = f"{ADMIN_COOKIE}={make_admin_cookie()}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax"
             msg = q.get("m", "")
             if cid:
                 # _admin_contest 收的是渲染好的 HTML；_admin_home 收的是纯文本（自己包 flash）
@@ -424,6 +452,11 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
 
     def _route_post(self):
         path = urllib.parse.urlparse(self.path).path
+        if path == "/admin/login":
+            from .scoreboard import login_route; return login_route(self, self._query(), post=True)
+        if path == "/admin/judge":
+            from .judge_settings import route
+            return route(self, self._query(), post=True)
         if path == "/enter":
             self._do_enter()
             return
@@ -447,9 +480,6 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             return
         if path == "/admin/reshuffle":
             self._admin_reshuffle()
-            return
-        if path == "/admin/accounts":
-            self._admin_accounts()
             return
         if path == "/admin/problem":
             self._admin_problem_post()
@@ -480,6 +510,8 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
 
 def main():
     store.admin_key()      # 确保密钥已生成
+    from ..core import grading
+    threading.Thread(target=grading.recover_submissions, name="csp-recover", daemon=True).start()
     contests = store.list_contests()
     log(f"比赛服务启动，端口 {PORT}，共 {len(contests)} 场比赛："
         + "、".join(f"{c['title']}({c['rule']})" for c in contests) if contests

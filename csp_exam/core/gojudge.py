@@ -28,6 +28,9 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
+import threading
+import time
 
 #: 沙箱地址；只允许本机，换机时用环境变量覆盖
 BASE = os.environ.get("CSP_GOJUDGE_URL", "http://127.0.0.1:5050").rstrip("/")
@@ -36,6 +39,9 @@ HTTP_TIMEOUT = int(os.environ.get("CSP_GOJUDGE_TIMEOUT", "120"))
 
 #: 文件名安全字符：fileId 是服务端给的，这里只做形状校验
 _FID_OK = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+_VERIFY_LOCK = threading.Lock()
+_VERIFIED_AT = 0.0
+_VERIFIED_INFO = {}
 
 
 class GoJudgeError(Exception):
@@ -43,8 +49,7 @@ class GoJudgeError(Exception):
 
 
 def _post(path: str, obj, *, raw: bytes | None = None, ctype: str = "application/json"):
-    data = obj if raw is not None else json.dumps(obj).encode("utf-8")
-    ctype = "application/octet-stream" if raw is not None else ctype
+    data = raw if raw is not None else json.dumps(obj).encode("utf-8")
     req = urllib.request.Request(BASE + path, data=data,
                                  headers={"Content-Type": ctype})
     try:
@@ -102,19 +107,51 @@ def probe() -> dict:
     return out
 
 
+def ensure_ready() -> dict:
+    """每分钟核验实际沙箱编译器、cgroup 与 seccomp，错误时停止评测。"""
+    global _VERIFIED_AT, _VERIFIED_INFO
+    with _VERIFY_LOCK:
+        if time.monotonic() - _VERIFIED_AT < 60 and _VERIFIED_INFO:
+            return dict(_VERIFIED_INFO)
+        p = probe()
+        if not p["ok"]:
+            raise GoJudgeError(p["error"])
+        r = run(["/usr/bin/g++", "--version"], cpu_ms=1000, memory_mb=64)
+        text = (r.get("files") or {}).get("stdout", b"").decode("utf-8", "replace")
+        first = text.splitlines()[0] if text else ""
+        if r.get("status") != "Accepted" or not first.endswith(" 9.3.0"):
+            raise GoJudgeError("评测环境不符合 NOI Linux 2.0：要求 G++ 9.3.0，实际 " + first)
+        r = run(["/bin/sh", "-c", "grep -E 'Seccomp:|NoNewPrivs:' /proc/self/status"],
+                cpu_ms=1000, memory_mb=64)
+        text = (r.get("files") or {}).get("stdout", b"").decode("utf-8", "replace")
+        if r.get("status") != "Accepted" or "Seccomp:\t2" not in text or "NoNewPrivs:\t1" not in text:
+            raise GoJudgeError("沙箱 seccomp 或 NoNewPrivs 未生效，已停止评测")
+        _VERIFIED_INFO = {"compiler": first, "sandbox": p["version"], "cgroup": p["cgroup"],
+                          "flags": ["-O2", "-std=c++14", "-static"]}
+        _VERIFIED_AT = time.monotonic()
+        return dict(_VERIFIED_INFO)
+
+
 # ------------------------------------------------------------------ 文件仓库
+
+def prepare(data: bytes) -> str:
+    """以 multipart 原样上传二进制，避免 JSON UTF-8 解码改变输入/输出。"""
+    boundary = "csp" + uuid.uuid4().hex
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+            'filename="data"\r\nContent-Type: application/octet-stream\r\n\r\n').encode()
+    body += data + f"\r\n--{boundary}--\r\n".encode()
+    value = _post("/file", None, raw=body,
+                  ctype=f"multipart/form-data; boundary={boundary}")
+    fid = value if isinstance(value, str) else (value or {}).get("fileId", "")
+    if not fid or any(c not in _FID_OK for c in fid):
+        raise GoJudgeError("沙箱上传文件没有返回有效 fileId")
+    return fid
 
 def fetch(file_id: str) -> bytes:
     """取回文件仓库里的内容（`copyOutCached` 存下来的编译产物就靠它）。"""
     if not file_id or any(c not in _FID_OK for c in file_id):
         raise GoJudgeError(f"fileId 形状不对：{file_id!r}")
     return _get("/file/" + urllib.parse.quote(file_id))
-
-
-# 注：**没有** `prepare()`（往仓库里传文件那个 `POST /file`）：v1.13 这个接口的形状
-# 没试出来（JSON 原文与 base64 都是 400）。目前所有输入都走 `/run` 的内联 `content`
-# （**原文**，不是 base64），够用：源码是文本、测试数据也是文本。
-# 真要传二进制数据时再来啃这个接口 —— 别照文档猜，先用 /run 内联顶着。
 
 
 def drop(file_id: str) -> None:
@@ -135,7 +172,8 @@ def drop(file_id: str) -> None:
 def run(args, *, copy_in=None, stdin: bytes | str = b"", env=None,
         cpu_ms: int = 5000, clock_ms: int | None = None, memory_mb: int = 256,
         stack_mb: int = 8, proc_limit: int = 64,
-        copy_out=("stdout", "stderr"), cached=None, files=None) -> dict:
+        copy_out=("stdout", "stderr"), cached=None, files=None,
+        copy_out_max: int = 64 * 1024 * 1024) -> dict:
     """在沙箱里跑一条命令，返回结果 dict（`status` / `time` / `memory` / `files` / `fileIds`）。
 
     * `copy_in` —— `{沙箱里的路径: {"content": str} 或 {"fileId": str}}`；
@@ -145,7 +183,7 @@ def run(args, *, copy_in=None, stdin: bytes | str = b"", env=None,
     * `stdin`   —— 喂给进程（CSP 的"文件输入"用不着它，但标准输入输出的题要用）
     """
     # 内联 content 是**原文**（不是 base64）—— 实测：`{"content": "1 2\n"}` 就是这个字符串本身。
-    # 所以内联只适合文本；二进制输入（极少数题）要另想办法（走 /file 的 POST，形状待定）。
+    # 内联只适合文本；正式评测以 prepare/fileId 传递原始字节。
     cmd = {
         "args": [str(a) for a in args],
         "env": list(env or ("PATH=/usr/bin:/bin:/usr/local/bin", "LANG=C.UTF-8")),
@@ -160,6 +198,8 @@ def run(args, *, copy_in=None, stdin: bytes | str = b"", env=None,
         "procLimit": int(proc_limit),
         "copyIn": dict(copy_in or {}),
         "copyOut": list(copy_out),
+        "copyOutMax": int(copy_out_max),
+        "copyOutTruncate": False,
     }
     if files:
         # 更精细的文件表（比如要单独给 stdin 挂文件）时用调用方给的

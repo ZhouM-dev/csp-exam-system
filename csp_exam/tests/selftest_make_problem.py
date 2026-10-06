@@ -16,9 +16,8 @@ import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))   # -> src/
-import csp_exam.compat  # noqa: F401  （登记平铺模块名，兼容老写法）
-from csp_exam.core import hydro_client, importer, problems, store, wrapper  # noqa: E402
-import make_problem as mp  # noqa: E402
+from csp_exam.core import importer, problems, store, wrapper  # noqa: E402
+from csp_exam.core import problems as mp  # noqa: E402
 
 PASS = FAIL = 0
 
@@ -90,35 +89,6 @@ def main() -> int:
     ok(std_name == "标程.cpp", "认出标程", std_name)
     stmt, stmt_name = mp.take_statement(files4)
     ok("测试题" in stmt, "认出题面", stmt_name)
-
-    tmp = tempfile.mkdtemp(prefix="mk-")
-    try:
-        cases4, _ = mp.pair_cases({k: v for k, v in files.items()})
-        root = mp.build_package(tmp, "T9001", "加法测试", cases4, files,
-                                time_ms=1500, memory_mb=128, statement=stmt,
-                                std_source=std)
-        checks = [
-            (os.path.isfile(os.path.join(root, "problem.yaml")), "problem.yaml"),
-            (os.path.isfile(os.path.join(root, "problem_zh.md")), "problem_zh.md"),
-            (os.path.isfile(os.path.join(root, "testdata", "config.yaml")), "testdata/config.yaml"),
-            (os.path.isfile(os.path.join(root, "std", "solution.cpp")), "std/solution.cpp"),
-        ]
-        for cond, label in checks:
-            ok(cond, "生成 " + label)
-        cfg = io.open(os.path.join(root, "testdata", "config.yaml"), encoding="utf-8").read()
-        ok("time: 1500" in cfg and "memory: 128" in cfg, "时限/内存在 config.yaml 里", cfg.replace("\n", " "))
-        yml = io.open(os.path.join(root, "problem.yaml"), encoding="utf-8").read()
-        ok("pid: T9001" in yml and "加法测试" in yml, "pid/标题写进了 problem.yaml")
-        data = sorted(os.listdir(os.path.join(root, "testdata")))
-        ok(data == ["1.in", "1.out", "2.in", "2.out", "3.in", "3.out",
-                    "4.in", "4.out", "5.in", "5.out", "config.yaml"],
-           "测试数据重排成 1..5 对", data)
-        ok(io.open(os.path.join(root, "testdata", "1.in"), encoding="utf-8").read() == "1 2\n",
-           "第 1 组内容正确")
-        ok(io.open(os.path.join(root, "testdata", "1.out"), encoding="utf-8").read() == "3\n",
-           "第 1 组答案正确")
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
 
     print()
     print("=== 5. 参数校验 / 缺答案也能建（留空 .out）===")
@@ -272,7 +242,7 @@ def main() -> int:
         ok(set(gone) == {"题面缓存", "大样例存档"}, "两处都报了", gone)
         ok(not os.path.isfile(os.path.join(tmp3, "statements", "G02.md")), "题面缓存没了")
         ok(not os.path.isdir(os.path.join(tmp3, "samples", "G02")), "大样例存档没了")
-        ok(mp.drop_problem_cache("没有这道题") == [], "没有残留时不报错、返回空")
+        ok(mp.drop_problem_cache("Missing") == [], "没有残留时不报错、返回空")
     finally:
         store.DATA_DIR = old_dir
         shutil.rmtree(tmp3, ignore_errors=True)

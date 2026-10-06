@@ -377,6 +377,10 @@ def update_contest(cid: str, **fields) -> dict | None:
         items = list_contests()
         for c in items:
             if c.get("id") == cid:
+                if "rule" in fields and fields["rule"] != c.get("rule") and load_results(cid):
+                    exam = dict(load_exam(cid), released=False)
+                    _save(_cp(cid, "exam.json"), exam)
+                    fields["released"] = False
                 c.update(fields)
                 save_contests(items)
                 return c
@@ -409,6 +413,10 @@ def load_exam(cid: str) -> dict:
 
 def save_exam(cid: str, exam: dict) -> None:
     with _LOCK:
+        old = load_exam(cid)
+        if old.get("problems", []) != exam.get("problems", []) and load_results(cid):
+            exam = dict(exam, released=False)
+            update_contest(cid, released=False)
         _save(_cp(cid, "exam.json"), exam)
 
 
@@ -579,6 +587,8 @@ def replace_roster(cid: str, names: list[str], prefix: str | None = None,
                    level: str | None = None, width: int = DEFAULT_WIDTH) -> dict[str, dict]:
     """用这批姓名**重建**本场名单，并重新生成考号（整场重排）。"""
     with _LOCK:
+        if load_results(cid):
+            raise ValueError("本场已有提交，不能重建名单或重排考号；请新建比赛。")
         contest = get_contest(cid) or {}
         prefix = prefix or contest.get("prefix") or DEFAULT_PREFIX
         level = level or level_of(contest)
@@ -670,46 +680,80 @@ def save_catalog(items: list[dict]) -> None:
     })
 
 
-def entry_total(entry: dict) -> int:
-    """总分 = 每题得分之和。
-
-    不直接信任存储的 total 字段：早期单场比赛的数据迁移过来时这个字段可能是旧的/空的
-    （出现过"每题 17+0+70，总分显示 0"）。按题目重新求和永远是准的。
-    """
-    return sum(int((v or {}).get("score") or 0)
-               for v in (entry.get("problems") or {}).values())
+def entry_total(entry: dict, cid: str = "") -> int:
+    """按题目求和；指定比赛时只计本场题目，存储 total 不作为权威。"""
+    parts = entry.get("problems") or {}
+    values = [parts.get(problem_dir_name(int(p["no"]))) for p in load_exam(cid).get("problems", [])] if cid else parts.values()
+    return sum(int((v or {}).get("score") or 0) for v in values)
 
 
-def ranking(cid: str, include_all: bool = False) -> list[dict]:
-    """按总分排名（OI/IOI/CSP 都是总分优先，同分并列）。
+def result_pending(entry: dict) -> bool:
+    return bool(entry.get("judging") or entry.get("rejudge_error") or
+                entry.get("submission_state") in ("queued", "judging", "error") or
+                any(p.get("pending") for p in entry.get("problems", {}).values()))
 
-    include_all=True 时把名单里还没提交的学生也列进来（rows 里 submitted=False），
-    管理端成绩总表需要看到"谁还没交"，学生端只看已提交的。
-    """
-    results = load_results(cid)
-    roster = load_roster(cid)
-    kaohaos = list(results)
-    if include_all:
-        kaohaos += [k for k in roster if k not in results]
-    rows = []
-    for kaohao in kaohaos:
-        entry = results.get(kaohao) or {}
-        rows.append({
-            "kaohao": kaohao,
-            "name": (roster.get(kaohao) or {}).get("name", "?"),
-            "total": entry_total(entry),
-            "problems": entry.get("problems", {}),
-            "structure_ok": entry.get("structure_ok", True),
-            "at": entry.get("submitted_at", ""),
-            "submitted": kaohao in results,
-        })
-    rows.sort(key=lambda r: (-r["total"], r["kaohao"]))
-    rank, last = 0, None
-    for i, r in enumerate(rows, 1):
-        if r["total"] != last:
-            rank, last = i, r["total"]
-        r["rank"] = rank
-    return rows
+
+def ranking(cid: str, include_all: bool = False, *, _results: dict | None = None) -> list[dict]:
+    """统一成绩投影：只计本场题目，名单外记录不参赛，未完成成绩不参与排名。"""
+    with _LOCK:
+        results, roster = load_results(cid) if _results is None else _results, load_roster(cid)
+        keys = [problem_dir_name(int(p["no"])) for p in load_exam(cid).get("problems", [])]
+        rows = []
+        for kaohao, student in roster.items():
+            entry = results.get(kaohao) or {}
+            if not include_all and kaohao not in results:
+                continue
+            parts = entry.get("problems", {})
+            rows.append({"kaohao": kaohao, "name": student.get("name", "?"),
+                         "total": sum(int((parts.get(k) or {}).get("score") or 0) for k in keys),
+                         "problems": parts, "structure_ok": entry.get("structure_ok", True),
+                         "at": entry.get("submitted_at", ""), "submitted": kaohao in results,
+                         "pending": result_pending(entry), "rank": None})
+        rows.sort(key=lambda r: (2 if r["pending"] else 1 if not r["submitted"] else 0, -r["total"], r["name"], r["kaohao"]))
+        rank, last = 0, None
+        for i, row in enumerate(rows, 1):
+            if row["pending"] or not row["submitted"]:
+                continue
+            if row["total"] != last:
+                rank, last = i, row["total"]
+            row["rank"] = rank
+        return rows
+
+
+def set_released(cid: str, released: bool) -> None:
+    """校验与公布在同一把锁中完成，避免与上传或重测竞态。"""
+    with _LOCK:
+        contest = get_contest(cid)
+        if not contest:
+            raise ValueError("比赛不存在")
+        exam = load_exam(cid)
+        results = load_results(cid).values()
+        if released and any(result_pending(r) for r in results):
+            raise ValueError("仍有提交未评测完成或需要重测，暂不能公布成绩。")
+        if released and any((r.get("submission_exam") is not None and
+                r["submission_exam"].get("problems", []) != exam.get("problems", [])) or
+                (r.get("judge_rule") and r["judge_rule"].get("key") != rule_of(contest)["key"])
+                for r in results):
+            raise ValueError("成绩对应的题目或赛制已改变，请重测后再公布。")
+        exam["released"] = bool(released)
+        save_exam(cid, exam)
+        update_contest(cid, released=bool(released))
+
+
+def invalidate_problem_results(pid: str, reason: str) -> None:
+    """题目数据或限额变更后撤回相关成绩；源码、历史分数与备份保留供重测。"""
+    with _LOCK:
+        for contest in list_contests():
+            cid = contest["id"]
+            if not any(p.get("pid") == pid for p in load_exam(cid).get("problems", [])):
+                continue
+            results = load_results(cid)
+            if not results:
+                continue
+            for entry in results.values():
+                entry.update(rejudge_error=reason, submission_state="error")
+            _save(_path("contests", cid, "results.json"), results)
+            set_released(cid, False)
 
 
 # ------------------------------------------------------------------ 题目与文件名

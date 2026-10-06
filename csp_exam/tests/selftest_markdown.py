@@ -17,7 +17,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))   # -> src/
-import csp_exam.compat  # noqa: F401  （登记平铺模块名，兼容老写法）
 from csp_exam.core.markdown import md_to_html  # noqa: E402
 
 PASS = FAIL = 0

@@ -32,3 +32,14 @@ work/_old-docs/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 学生成绩导出、隔离测试产物与本地凭据
+csp-exports/
+tests/tmp/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ed25519

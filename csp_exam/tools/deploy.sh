@@ -1,60 +1,37 @@
 #!/usr/bin/env bash
-# 一条命令部署考试服务到服务器（比逐个 scp 稳，不会再漏文件）。
-#
-#   bash csp_exam/tools/deploy.sh [服务器]       默认 admin@<你的服务器IP>
-#
-# 做的事：同步源码/文档/验收脚本 → 服务端导入检查 → 重启 → 全路由冒烟 → 包内自测。
-# 数据（data/）与日志（logs/）不会被覆盖。
-#
-# 目录约定：本脚本在 <树根>/csp_exam/tools/ 下，<树根> 就是要同步上去的那棵树
-# （本地工作副本 ↔ 服务器 /root/csp-exam，两边同构）。
+# 同步源码/文档/测试，保留 data 与 logs。使用现有 SSH 配置，密钥可选。
 set -euo pipefail
-
-HOST="${1:-admin@<你的服务器IP>}"
-# 登录用的是普通用户 admin（root@ 直登不通），密钥默认这个；换机加 CSP_SSH_KEY 环境变量
-KEY="${CSP_SSH_KEY:-$HOME/.ssh/<你的密钥名>}"
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"     # → 树根
+HOST="${1:?用法：bash csp_exam/tools/deploy.sh admin@服务器}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SSH=(ssh -o BatchMode=yes)
+[[ -z "${CSP_SSH_KEY:-}" ]] || SSH+=(-i "$CSP_SSH_KEY")
 REMOTE=/root/csp-exam
-SSH="ssh -i $KEY -o BatchMode=yes $HOST"
-
-[ -f "$ROOT/run.py" ] || { echo "在 $ROOT 下找不到 run.py，脚本位置不对？"; exit 1; }
-
-echo "=== 1. 同步源码到 $HOST:$REMOTE ==="
-# --no-same-owner：别把本地（Windows/MSYS）的 uid 带到服务器上，落盘一律 root
-tar czf - -C "$ROOT" run.py csp_exam | $SSH "sudo tar xzf - --no-same-owner -C $REMOTE"
-$SSH "sudo find $REMOTE/csp_exam -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true"
-# 「能不能 import」用 stdin 喂脚本，省得跟 sudo/单引号/双引号三层转义打架
-$SSH "sudo env PYTHONPATH=$REMOTE python3 -" <<'PY'
-import csp_exam, csp_exam.compat
-print("  服务端导入 OK")
+STAGE="$("${SSH[@]}" "$HOST" 'mktemp -d /tmp/csp-deploy.XXXXXX')"
+[[ "$STAGE" == /tmp/csp-deploy.* ]] || { echo "暂存路径不正确" >&2; exit 1; }
+cleanup_remote() { "${SSH[@]}" "$HOST" "sudo -n rm -rf -- $STAGE"; }
+trap cleanup_remote EXIT
+bash "$ROOT/tests/_regress_all.sh" --quick
+tar czf - --exclude=__pycache__ --exclude='*.pyc' -C "$ROOT" run.py csp_exam docs tests tasks README.md 项目索引.md 整改清单.md | "${SSH[@]}" "$HOST" "tar xzf - -C $STAGE"
+"${SSH[@]}" "$HOST" "cd $STAGE && python3 csp_exam/tools/run_selftests.py"
+"${SSH[@]}" "$HOST" "sudo -n python3 - $STAGE" <<'PY'
+import pathlib,shutil,sys,tarfile,time
+root=pathlib.Path('/root/csp-exam');stage=pathlib.Path(sys.argv[1])
+assert str(stage.resolve()).startswith('/tmp/csp-deploy.')
+sys.path.insert(0,str(root))
+from csp_exam.core import store
+assert not any(r.get('judging') for c in store.list_contests() for r in store.load_results(c['id']).values()), '仍有在途评测，请稍后部署'
+backup=pathlib.Path('/root/csp-history-backup-20261007-012536');backup.mkdir(exist_ok=True)
+with tarfile.open(backup/'latest-source-rollback.tgz','w:gz') as tar:
+ for name in ('run.py','csp_exam','docs','tests','tasks','README.md','项目索引.md','整改清单.md'):
+  if (root/name).exists():tar.add(root/name,arcname=name,filter=lambda m:None if '__pycache__' in m.name or m.name == 'tests/tmp' or m.name.startswith('tests/tmp/') else m)
+import subprocess
+subprocess.run(['systemctl','stop','csp-exam'],check=True)
+try:
+ for name in ('csp_exam','docs','tests','tasks'):
+  if (root/name).exists():shutil.rmtree(root/name)
+  shutil.copytree(stage/name,root/name)
+ for name in ('run.py','README.md','项目索引.md','整改清单.md'):shutil.copy2(stage/name,root/name)
+finally:subprocess.run(['systemctl','start','csp-exam'],check=True)
 PY
-
-echo
-echo "=== 2. 同步文档与验收脚本 ==="
-# 本地的「项目索引」在开发机上叫 README.md、在这份工作副本里叫 项目索引.md，两个名字都认
-IDX=""
-for cand in 项目索引.md README.md; do
-  [ -f "$ROOT/$cand" ] && { IDX="$cand"; break; }
-done
-SYNC="docs tests"
-[ -n "$IDX" ] && SYNC="$SYNC $IDX"
-tar czf - -C "$ROOT" $SYNC | $SSH "sudo tar xzf - --no-same-owner -C $REMOTE"
-if [ -n "$IDX" ] && [ "$IDX" != "项目索引.md" ]; then
-  $SSH "sudo mv -f $REMOTE/$IDX $REMOTE/项目索引.md"
-fi
-$SSH "sudo ls $REMOTE/docs | sed 's/^/  docs\//'"
-
-echo
-echo "=== 3. 重启服务 ==="
-$SSH "sudo systemctl restart csp-exam && sleep 2 && systemctl is-active csp-exam" | sed 's/^/  /'
-
-echo
-echo "=== 4. 全路由冒烟 ==="
-$SSH "sudo bash $REMOTE/tests/_smoke_pages.sh" | tail -3
-
-echo
-echo "=== 5. 包内自测 ==="
-$SSH "sudo env PYTHONPATH=$REMOTE python3 $REMOTE/csp_exam/tools/run_selftests.py"
-
-echo
-echo "部署完成。要跑完整验收： ssh -i $KEY $HOST 'sudo bash $REMOTE/tests/_regress_all.sh'"
+"${SSH[@]}" "$HOST" "sudo -n bash -c 'cd $REMOTE && bash tests/_smoke_pages.sh'"
+echo '部署完成，业务数据保持原样。'
