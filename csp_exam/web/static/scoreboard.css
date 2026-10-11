@@ -1,0 +1,25 @@
+/* Retained rank-table interactions and score states; shell/components are Tabler. */
+.tools{display:flex;align-items:center;gap:10px}.search{position:relative;display:flex;align-items:center}
+.search svg{position:absolute;left:12px;width:16px;height:16px;color:#91a0b4;pointer-events:none}
+.search input{width:220px;padding-left:36px}
+
+
+.refresh svg{width:17px;height:17px}
+.board-status{font-size:12px;color:#aa563c}.scroll{overflow:auto;max-height:calc(100vh - 255px);min-height:100px}
+.board table{border-collapse:separate;border-spacing:0;width:100%;font-variant-numeric:tabular-nums;text-align:center}
+.board thead th{position:sticky;top:0;z-index:2;background:#fafbfd;font-weight:500;font-size:12px;color:#8490a2;
+ height:48px;padding:12px 18px;border-bottom:1px solid #e8edf3;white-space:nowrap}
+.board tbody td{height:64px;padding:12px 18px;border-bottom:1px solid #eef1f6;white-space:nowrap;background:white}
+.board tbody tr:last-child td{border-bottom:0}.board tbody tr:hover td{background:#f8faff}
+.rank-col{width:84px;min-width:70px}.name-col{text-align:left;min-width:155px;max-width:240px}
+.total-col{width:110px;min-width:90px}.problem-col{min-width:100px}
+.rank{color:#94a0b1;font-size:15px}.rank.leader{color:#365f9d;font-weight:650}
+.student-name{font-weight:550;white-space:normal;overflow-wrap:anywhere;display:inline-flex;align-items:center;gap:7px}
+a.student-name:hover{color:#245cd3}.student-name svg{color:#a8b5c6;width:13px;height:13px;flex-shrink:0}
+.total{font-size:19px;letter-spacing:-.3px;font-weight:700;color:#253c60}.total.waiting{font-size:12px;font-weight:500;color:#97a2b1}
+.score{display:inline-flex;align-items:center;justify-content:center;min-width:48px;height:30px;padding:0 10px;border-radius:6px;font-weight:550}
+.score.full{background:#eaf6ef;color:#2d845b}.score.part{background:#fff5e2;color:#a87920}.score.zero{color:#8895a8;background:#f3f5f8}
+.score.blank{color:#b0bac8;font-weight:400}a.score:hover{box-shadow:inset 0 0 0 1px currentColor}
+.empty{text-align:center;padding:54px 20px!important;color:#8f9bad;font-size:14px}
+.locked{padding:60px 20px;text-align:center;color:#8895a7}.locked svg{display:block;margin:0 auto 14px;width:28px;height:28px;color:#a5b1c1}
+

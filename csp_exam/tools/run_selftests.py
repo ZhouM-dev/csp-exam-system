@@ -23,7 +23,7 @@ def main() -> int:
         return 1
     ok = fail = total = 0
     for name in tests:
-        p = subprocess.run([sys.executable, name], cwd=TESTS,
+        p = subprocess.run([sys.executable, '-X', 'utf8', name], cwd=TESTS,
                            capture_output=True, text=True, encoding="utf-8", errors="replace")
         out = (p.stdout or "") + (p.stderr or "")
         nums = [l for l in out.splitlines() if "结果" in l]

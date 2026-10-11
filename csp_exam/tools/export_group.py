@@ -37,17 +37,21 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from html import escape as html_escape  # noqa: E402
 from csp_exam.core import localoj, problems as mp, store  # noqa: E402
 from csp_exam.core.markdown import md_to_html  # noqa: E402
-from csp_exam.web.ui import CSS as SITE_CSS  # noqa: E402
+from pathlib import Path
+
+_STATIC = Path(__file__).resolve().parents[1] / 'web/static'
+SITE_CSS = ((_STATIC / 'vendor/tabler/1.6.1/tabler.min.css').read_text(encoding='utf-8')
+            + '\n' + (_STATIC / 'exam-components.css').read_text(encoding='utf-8'))
 
 #: 汇总页的外壳。KaTeX 走 CDN（联网时公式排版正常；断网时退化成 `$…$` 原文，不影响阅读）
 _HTML = """<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>%s · 题目</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
 <style>%s
-body{background:#f7f8fa}</style>
+body{background:#f7f8fa}.wrap{max-width:1100px;margin:24px auto;padding:0 16px}</style>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
-        onload="if(window.renderMathInElement)renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'\\\\[',right:'\\\\]',display:true},{left:'$',right:'$',display:false}],throwOnError:false,ignoredTags:['script','noscript','style','textarea','pre','code','option']});"></script>
+        onload="if(window.renderMathInElement)renderMathInElement(document.body,{delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}],throwOnError:false,ignoredTags:['script','noscript','style','textarea','pre','code','option']});"></script>
 </head><body><div class="wrap">
 <h1>%s</h1>
 <p class="muted">本场共 %d 道题 · 导出于 %s</p>

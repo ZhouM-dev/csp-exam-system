@@ -16,399 +16,9 @@ from ..core.grading import graded_cell
 from ..core import store
 from ..core.util import _fmt_bytes, _fmt_ms, _fmt_kb
 from ..core.markdown import md_to_html  # noqa: F401  (导出给页面用)
+from .tabler_theme import document
 
-CSS = '\n*{box-sizing:border-box}\nbody{font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;margin:0;\n     background:#f5f6f8;color:#222;line-height:1.65}\n.wrap{max-width:1000px;margin:0 auto;padding:18px 16px 60px}\nh1{font-size:22px;margin:6px 0 4px}\nh2{font-size:17px;margin:22px 0 8px;padding-bottom:6px;border-bottom:2px solid #e3e6ea}\n.card{background:#fff;border:1px solid #e3e6ea;border-radius:10px;padding:16px 18px;margin:12px 0}\n.muted{color:#777;font-size:13px}\ninput[type=text],input[type=password],textarea,select{width:100%;padding:9px 11px;border:1px solid #ccd2d8;\n     border-radius:7px;font-size:15px;font-family:inherit}\ntextarea{min-height:130px;font-family:ui-monospace,Consolas,monospace}\ntextarea.code{min-height:420px;font-size:14.5px;line-height:1.6;white-space:pre;tab-size:4}\nbutton,.btn{background:#2563eb;color:#fff;border:0;border-radius:7px;padding:10px 20px;\n     font-size:15px;cursor:pointer;text-decoration:none;display:inline-block}\nbutton:hover,.btn:hover{background:#1d4ed8}\n.btn-gray{background:#6b7280}.btn-gray:hover{background:#4b5563}\n.btn-sm{padding:5px 12px;font-size:13px}\n.btn-danger{background:#dc2626}.btn-danger:hover{background:#b91c1c}\ntable{width:100%;border-collapse:collapse;font-size:14px}\nth,td{border-bottom:1px solid #e8ebee;padding:7px 8px;text-align:left}\nth{background:#f2f4f7;font-weight:600}\npre{background:#0f172a;color:#e2e8f0;padding:13px;border-radius:8px;overflow:auto;\n    font-size:13px;line-height:1.5}\n.ok{color:#15803d}.warn{color:#b45309}.err{color:#b91c1c}\n.tag{display:inline-block;padding:1px 8px;border-radius:11px;font-size:12px;background:#e5e7eb}\n.tag-oi{background:#e0e7ff;color:#3730a3}.tag-ioi{background:#dcfce7;color:#166534}\n.tag-csp{background:#fef3c7;color:#92400e}\n.tag-ok{background:#dcfce7;color:#15803d}.tag-bad{background:#fee2e2;color:#b91c1c}\n.tag-wait{background:#f1f5f9;color:#475569}\n.tree{font-family:ui-monospace,Consolas,monospace;font-size:13px;background:#f8fafc;\n      color:#334155;border:1px dashed #cbd5e1;border-radius:8px;padding:12px;white-space:pre}\n.kv{display:flex;flex-wrap:wrap;gap:20px}\n.kv div{min-width:140px}\n.kv b{display:block;font-size:12px;color:#777;font-weight:400}\n.flash{padding:11px 14px;border-radius:8px;margin:10px 0}\n.flash-ok{background:#dcfce7;border:1px solid #86efac}\n.flash-err{background:#fee2e2;border:1px solid #fca5a5}\n.flash-info{background:#e0f2fe;border:1px solid #7dd3fc}\n.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}\n.part{color:#b45309}                       /* 部分分：既不是对也不是错 */\n.kv a{text-decoration:none}\n.code-view{max-height:520px;font-size:13px}\n.code-numbered{line-height:1.55}\n.code-flex{display:flex;align-items:stretch;background:#0f172a;border-radius:8px;max-height:520px}\n.code-flex pre{margin:0;background:transparent;border-radius:0;max-height:none;white-space:pre}\n.code-gutter{flex:none;max-height:520px;padding:13px 8px 13px 12px;text-align:right;color:#64748b;user-select:none;background:rgba(148,163,184,.12);border-radius:8px 0 0 8px;overflow:hidden}\n.code-flex pre.code-body{flex:1 1 auto;min-width:0;overflow:auto;overflow-y:auto;border-radius:0 8px 8px 0}\n.code-copy-bar{display:flex;justify-content:flex-end;gap:8px;margin:6px 0 0}\n.tree-link a{color:#1d4ed8;text-decoration:none}\n.tree-link a:hover{text-decoration:underline}\n.tree-link{line-height:1.8}\n.stmt h2,.stmt h3{margin:18px 0 8px;padding:0;border:0}\n.stmt h4,.stmt h5,.stmt h6{margin:14px 0 6px}\n.stmt p{margin:8px 0}\n.stmt pre,.stmt-code{background:#f8fafc;color:#334155;border:1px solid #e2e8f0;\n     border-radius:8px;padding:10px 12px;font-size:13.5px;overflow:auto}\n.stmt code{background:#f1f5f9;border-radius:4px;padding:1px 5px;\n     font-family:ui-monospace,Consolas,monospace}\n.stmt pre code{background:none;padding:0}\n.stmt ul,.stmt ol{margin:8px 0 8px 22px}\n.stmt blockquote{margin:8px 0;padding:6px 12px;border-left:3px solid #cbd5e1;color:#475569}\n.stmt table{margin:10px 0}\n.stmt hr{border:0;border-top:1px solid #e2e8f0;margin:16px 0}\n.csp-picker{display:flex;gap:8px}\n.csp-picker input{flex:1}\n.csp-catalog-wrap{max-height:300px;overflow:auto;border:1px solid #e3e6ea;border-radius:8px;\n     background:#fff}\n.csp-catalog-wrap table{margin:0}\n.csp-catalog-wrap th{position:sticky;top:0;z-index:1}\n.csp-manual{margin-top:12px}\n.csp-manual summary{cursor:pointer;color:#2563eb}\n'
-
-
-#: ---- T-07 新增的类（原型 assets/contest.css 里已确认好的一版）----
-#:
-#: 全部**追加**在原有规则后面：上面一条老规则都没改，老页面外观不变。
-#: 分组：倒计时 .timer-* · 检查清单 .checklist/.ck · 命名红线 .rule-warn ·
-#:       测试点明细 .tp-* · 悬浮窗 .modal-* · 代码框 .codebox ·
-#:       徽章 .tag-level · 卡片 .pcard-* · 其他 .me-card/.nowrap
-CSS += r"""
-/* ============================================================
-   倒计时（对齐真实程序回收系统的「距离考试结束：254:08:59」）
-   ============================================================ */
-.timer-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  flex-wrap: wrap;
-  background: #0f172a;
-  color: #e2e8f0;
-  border-radius: 10px;
-  padding: 12px 18px;
-  margin: 12px 0;
-}
-.timer-bar .timer-label { font-size: 14px; color: #94a3b8; }
-.timer-bar .timer-value {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 30px;
-  font-weight: 700;
-  letter-spacing: 1px;
-  font-variant-numeric: tabular-nums;
-}
-.timer-bar .timer-note { font-size: 12.5px; color: #94a3b8; }
-.timer-bar.timer-urgent { background: #7f1d1d; }
-.timer-bar.timer-urgent .timer-value { color: #fecaca; }
-.timer-bar.timer-over .timer-value { color: #fca5a5; }
-
-/* ============================================================
-   题目状态卡片（真实系统：白底＝未提交，绿底＝已提交）
-   ============================================================ */
-.pcard-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
-  gap: 10px;
-}
-.pcard-item {
-  background: #fff;
-  border: 1px solid #d8dee6;
-  border-radius: 9px;
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.pcard-item.done { background: #dcfce7; border-color: #86efac; }
-.pcard-item .pcard-no { font-size: 12px; color: #64748b; }
-.pcard-item .pcard-slug {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 17px;
-  font-weight: 700;
-  color: #1f2933;
-}
-.pcard-item .pcard-meta { font-size: 12.5px; color: #475569; line-height: 1.5; }
-.pcard-item .pcard-meta b { font-weight: 500; color: #64748b; }
-.pcard-item .pcard-actions { display: flex; gap: 6px; margin-top: 8px; }
-.pcard-empty { color: #94a3b8; }
-
-/* ============================================================
-   交卷前检查清单
-   ============================================================ */
-.checklist { list-style: none; margin: 0; padding: 0; }
-.checklist li {
-  display: flex;
-  gap: 9px;
-  align-items: flex-start;
-  padding: 7px 0;
-  border-bottom: 1px dashed #e8ebee;
-  font-size: 14px;
-}
-.checklist li:last-child { border-bottom: 0; }
-.checklist .ck {
-  flex: 0 0 auto;
-  width: 17px; height: 17px;
-  margin-top: 3px;
-  border: 1.5px solid #94a3b8;
-  border-radius: 4px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  color: #fff;
-}
-.checklist li.pass .ck { background: #16a34a; border-color: #16a34a; }
-.checklist li.fail .ck { background: #dc2626; border-color: #dc2626; }
-.checklist li.todo .ck { background: #fff; }
-.checklist .ck-note { color: #64748b; font-size: 13px; }
-
-/* ============================================================
-   命名红线提示（_ 与 - 、大小写、空格）
-   ============================================================ */
-.rule-warn {
-  background: #fffbeb;
-  border: 1px solid #fcd34d;
-  border-radius: 9px;
-  padding: 12px 15px;
-  margin: 10px 0;
-  font-size: 14px;
-}
-.rule-warn b { color: #92400e; }
-.rule-warn ul { margin: 6px 0 0 20px; }
-.rule-warn code {
-  background: #fef3c7;
-  border-radius: 4px;
-  padding: 1px 6px;
-  font-family: ui-monospace, Consolas, monospace;
-}
-
-/* ============================================================
-   管理端顶部快捷入口（常驻）
-   滚到页面下半截也一直贴在窗口顶部，省得改完题目表还要滚回去点「本场管理」。
-   z-index 取 50：压得住表格内容，又低于 .modal-mask 的 1000（弹窗还得在上面）。
-   底色用 body 同一个 #f5f6f8，滚动时下面的内容不会从缝里透出来。
-   ============================================================ */
-.admin-nav {
-  position: sticky;
-  top: 0;
-  z-index: 50;
-  background: #f5f6f8;
-  border-bottom: 1px solid #e3e6ea;
-  padding: 7px 0 6px;
-  margin: 0 0 2px;
-}
-
-/* ============================================================
-   题目列表（/admin/problems）的表格
-   要求：**不出现横向滚动条**。做法是固定布局 + 按列限宽（百分比，永远塞得下），
-   超长内容用省略号截断；被截掉的全文写在单元格的 title 里，鼠标悬停能看全
-   （老师要靠标题认题，不能截得看不出是哪道）。
-   「操作」列不参与截断：宁可让两个按钮换行，也不要把按钮裁掉半截点不着。
-   ============================================================ */
-.csp-prob-table { table-layout: fixed; width: 100%; }
-.csp-prob-table th, .csp-prob-table td {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.csp-prob-table code {
-  display: inline-block;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  vertical-align: bottom;
-}
-.csp-prob-table th:last-child, .csp-prob-table td:last-child {
-  white-space: normal;
-  overflow: visible;
-}
-.csp-prob-table td:last-child button { margin: 1px 0; }
-
-/* ============================================================
-   徽章：级别（与老 .tag-oi/.tag-csp 同一套观感）
-   ============================================================ */
-.tag-level { background: #e0e7ff; color: #3730a3; }
-
-/* ============================================================
-   个人信息文件卡
-   ============================================================ */
-.me-card {
-  background: #f0f9ff;
-  border: 1px solid #bae6fd;
-  border-radius: 9px;
-  padding: 12px 15px;
-  margin: 10px 0;
-  font-size: 14px;
-}
-.me-card .me-name {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 15px;
-  font-weight: 700;
-  color: #075985;
-}
-
-/* ============================================================
-   宽表格：不折行，超出就让外层卡片横向滚动
-   ============================================================ */
-table.nowrap th, table.nowrap td { white-space: nowrap; }
-
-/* ============================================================
-   可直接编辑的代码框（题面/标程）
-   ============================================================ */
-textarea.codebox {
-  min-height: 260px;
-  font-family: ui-monospace, Consolas, "Microsoft YaHei", monospace;
-  font-size: 13.5px;
-  line-height: 1.62;
-  white-space: pre;
-  tab-size: 4;
-  resize: vertical;
-  background: #fcfdfe;
-}
-.codebox-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin: 0 0 6px;
-  font-size: 13px;
-  color: #64748b;
-}
-.codebox-bar .ok { color: #15803d; }
-
-/* ============================================================
-   悬浮窗（题面预览 / 查看题面 / 自己测试 / 测试点详情）
-   开关见 static/contest.js：点 [data-modal-open="id"] 开，
-   点 [data-modal-close] 或遮罩、按 Esc 关。
-   ============================================================ */
-.modal-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  background: rgba(15, 23, 42, .45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-}
-.modal-mask[hidden] { display: none; }
-.modal-panel {
-  background: #f5f6f8;
-  border-radius: 12px;
-  width: min(980px, 100%);
-  max-height: 88vh;
-  display: flex;
-  flex-direction: column;
-  box-shadow: 0 20px 60px rgba(15, 23, 42, .28);
-  overflow: hidden;
-}
-.modal-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 18px;
-  background: #fff;
-  border-bottom: 1px solid #e3e6ea;
-  flex: 0 0 auto;
-}
-.modal-head h2 {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  font-size: 16px;
-}
-.modal-head .modal-sub { font-size: 12.5px; color: #64748b; font-weight: 400; }
-.modal-body {
-  overflow: auto;
-  padding: 16px 18px 22px;
-  flex: 1 1 auto;
-}
-.modal-body .card:first-child { margin-top: 0; }
-.modal-close {
-  background: #eef2f7;
-  color: #334155;
-  border: 1px solid #d5dbe1;
-  border-radius: 7px;
-  padding: 6px 14px;
-  font-size: 13px;
-  cursor: pointer;
-}
-.modal-close:hover { background: #e2e8f0; }
-
-/* ============================================================
-   测试点明细（提交详情、题目列表的自己测试）
-   ============================================================ */
-/* 可点的状态：保留下划线示意"点得动"，颜色沿用 ok/err */
-a.tp-open {
-  text-decoration: none;
-  border-bottom: 1px dashed currentColor;
-  cursor: pointer;
-}
-a.tp-open:hover { border-bottom-style: solid; }
-a.tp-open:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 3px; }
-.tp-strip {
-  font-family: ui-monospace, Consolas, monospace;
-  font-size: 15px;
-  letter-spacing: 2px;
-  line-height: 1.2;
-}
-.tp-ok   { color: #16a34a; font-weight: 700; }
-.tp-wa   { color: #dc2626; font-weight: 700; }
-.tp-tle  { color: #d97706; font-weight: 700; }
-.tp-mle  { color: #7c3aed; font-weight: 700; }
-.tp-re   { color: #b91c1c; font-weight: 700; }
-.tp-na   { color: #cbd5e1; }
-.tp-legend { font-size: 12.5px; color: #64748b; }
-.tp-legend span { margin-right: 14px; white-space: nowrap; }
-
-table.tp-table { font-size: 13px; }
-table.tp-table th, table.tp-table td { padding: 5px 8px; }
-tr.tp-group td {
-  background: #f2f4f7;
-  font-size: 13px;
-  color: #334155;
-  border-bottom: 1px solid #dbe1e8;
-}
-tr.tp-group .tp-sub-score { float: right; font-weight: 600; }
-.tp-card {
-  border: 1px solid #e3e6ea;
-  border-radius: 9px;
-  padding: 12px 14px;
-  margin: 10px 0;
-  background: #fff;
-}
-.tp-card h3 { margin: 0 0 8px; font-size: 14.5px; }
-.tp-fail { background: #fef2f2; }
-.tp-pass { background: #f0fdf4; }
-
-/* ============================================================
-   题目列表：操作列排一行
-   （列宽在页面里按百分比给足；这里只管「不许折行」——
-    删掉一个按钮后剩三个，一行放得下，折行反而让行高忽高忽低不好点）
-   ============================================================ */
-.prob-ops { display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; }
-.prob-ops form { display: inline; margin: 0; }
-.prob-ops .btn { white-space: nowrap; }
-/* 点了删除、等服务端回话的那一下：先把这行灰掉，别让人以为没点上 */
-tr.row-busy { opacity: .4; pointer-events: none; }
-#prob-flash:empty { display: none; }
-#prob-flash { margin: 10px 0; }
-
-/* ============================================================
-   题目详情页：左边改（Markdown 原文），右边看（学生视角的成品）
-   ============================================================ */
-.pd-bar {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 10px;
-}
-.pd-bar .muted { font-size: 13px; }
-.pd-bar .btn.on { background: #2563eb; border-color: #2563eb; color: #fff; }
-.pd-wrap { display: flex; gap: 14px; align-items: flex-start; }
-.pd-wrap > * { min-width: 0; }
-.pd-left { flex: 1 1 50%; }
-.pd-right { flex: 1 1 50%; position: sticky; top: 8px; }
-.pd-wrap[data-mode="left"] .pd-right { display: none; }
-.pd-wrap[data-mode="right"] .pd-left { display: none; }
-.pd-wrap[data-mode="left"] .pd-left, .pd-wrap[data-mode="right"] .pd-right { flex: 1 1 100%; }
-.pd-wrap .card { margin-top: 0; }
-.pd-left .card + .card { margin-top: 12px; }
-#pd-src { width: 100%; min-height: 54vh; }
-.pd-right .card { max-height: 84vh; overflow: auto; }
-.pd-right .stmt { border: 0; padding: 0; }
-.pd-note { font-size: 13px; margin: 6px 0 0; }
-/* ============================================================
-   多选下拉（比赛列表的「按名单分组分类」用）
-   没 JS 时面板是展开的（退化成普通勾选框，照样能用）；有 JS 才收成下拉。
-   ============================================================ */
-@media (max-width: 980px) {
-  .pd-wrap { flex-direction: column; }
-  .pd-left, .pd-right { flex: 1 1 auto; width: 100%; }
-  .pd-right { position: static; }
-}
-
-/* ============================================================
-   多选下拉（比赛列表的「按名单分组分类」用）
-   没 JS 时面板是展开的（退化成普通勾选框，照样能用）；有 JS 才收成下拉。
-   ============================================================ */
-.contest-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
-.contest-list-note { flex: 1 1 260px; }
-.contest-pagination { margin: 16px 0; }
-.gmul { position: relative; display: inline-block; max-width: 100%; }
-#gmul-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gmul-panel {
-  position: absolute; z-index: 60; top: calc(100% + 6px); left: 0;
-  width: 480px; max-width: calc(100vw - 72px);
-  max-height: min(480px, 70vh); overflow-y: auto;
-  background: #fff; border: 1px solid #d5dbe1; border-radius: 9px;
-  padding: 14px 16px;
-  box-shadow: 0 8px 22px rgba(15, 23, 42, .14);
-  white-space: normal; overflow-wrap: anywhere;
-}
-.gmul-panel[hidden] { display: none; }
-.gmul-options { max-height: 260px; overflow-y: auto; margin: 10px 0; }
-.gmul-panel label { display: flex; align-items: flex-start; gap: 6px; font-weight: 400; margin: 8px 0; white-space: normal; }
-.gmul-panel input[type=checkbox] { flex: 0 0 auto; margin-top: 6px; }
-.gmul-name { flex: 1; min-width: 0; }
-.gmul-panel label .muted { flex: 0 0 auto; }
-.gmul-panel .gmul-foot { margin: 10px 0 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-
-/* 题面里的显示公式块（`$$ … $$`）：整块一个元素，公式太长时横向滚动，别把卡片撑破 */
-.math-block { overflow-x: auto; overflow-y: hidden; }
-"""
+# Exam-specific widget CSS lives in static/exam-components.css.
 
 
 def render_upload_tree_html(base: str, notes: dict[str, str] | None = None,
@@ -549,7 +159,8 @@ def contest_script() -> str:
 
 
 def page(title: str, body: str, nav: str = "", refresh: int = 0,
-         math: bool = False, contest_js: bool = True) -> bytes:
+         math: bool = False, contest_js: bool = True, *, auth: bool = False,
+         show_title: bool = True, extra_head: str = "") -> bytes:
     """整页外壳。math=True 时额外引入本地 KaTeX（题面页用，渲染 $...$ 公式）。
 
     contest_js=True（默认）时把共用前端脚本内联进 `<head>`——放在正文之前，
@@ -561,35 +172,32 @@ def page(title: str, body: str, nav: str = "", refresh: int = 0,
     math_script = ""
     if math:
         math_head = ('<link rel="stylesheet" href="/static/katex/katex.min.css">')
-        math_script = """
+        math_script = r"""
 <script defer src="/static/katex/katex.min.js"></script>
 <script defer src="/static/katex/auto-render.min.js"></script>
 <script>
 document.addEventListener("DOMContentLoaded", function () {
   if (!window.renderMathInElement) return;      /* 没加载成功就保持原样（显示 $...$） */
-  var box = document.querySelector(".stmt") || document.body;
-  try {
-    renderMathInElement(box, {
+  var boxes = document.querySelectorAll(".stmt");
+  if (!boxes.length) boxes = [document.body];
+  boxes.forEach(function (box) {
+    try {
+      renderMathInElement(box, {
       delimiters: [
         { left: "$$", right: "$$", display: true },
-        { left: "\\[", right: "\\]", display: true },
-        { left: "$", right: "$", display: false },
-        { left: "\\(", right: "\\)", display: false }
+        { left: "$", right: "$", display: false }
       ],
       throwOnError: false,
       ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code", "option"]
-    });
-  } catch (e) { /* 渲染失败不影响阅读 */ }
+      });
+    } catch (e) { /* 渲染失败不影响阅读 */ }
+  });
 });
 </script>"""
     shared = contest_script() if contest_js else ""
     contest_head = f"<script>{shared}</script>" if shared else ""
-    return f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">{r}{math_head}{contest_head}
-<title>{html.escape(title)}</title><style>{CSS}</style></head><body>
-<div class="wrap">{nav}<h1>{html.escape(title)}</h1>{body}
-<p class="muted" style="margin-top:34px">CSP 训练站</p>
-</div>{math_script}</body></html>""".encode("utf-8")
+    return document(title, nav + body, extra_head=r + math_head + contest_head + extra_head,
+                    extra_script=math_script, auth=auth, show_title=show_title)
 
 
 def render_upload_tree(base: str, notes: dict[str, str] | None = None) -> tuple[str, int, int]:
@@ -783,7 +391,7 @@ def modal(mid: str, title: str, body: str, sub: str = "",
     return (f'<div class="modal-mask" id="{html.escape(str(mid), quote=True)}" hidden>'
             f'<div class="modal-panel" role="dialog" aria-modal="true"'
             f' aria-label="{html.escape(title, quote=True)}">'
-            f'<div class="modal-head"><h2>{html.escape(title)}{sub_html}</h2>{head_extra}'
+            f'<div class="modal-head"><h2 class="modal-title">{html.escape(title)}{sub_html}</h2>{head_extra}'
             f'<button type="button" class="modal-close" data-modal-close>'
             f'{html.escape(close_label)}</button></div>'
             f'<div class="modal-body">{body}</div>'

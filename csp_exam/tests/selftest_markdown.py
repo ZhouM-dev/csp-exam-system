@@ -74,6 +74,19 @@ def main() -> int:
     ok("<script" not in md_to_html("<script>alert(1)</script>"), "题面里的 HTML 被转义（不注入）")
 
     print()
+    print("=== 5. 公式与代码不能互相改写 ===")
+    h8 = md_to_html(r"乘法 $a_i * b_j + c_i * d_j$，**重点**，`a * b * c`。")
+    ok("$a_i * b_j + c_i * d_j$" in h8 and "<i>" not in h8,
+       "行内公式的乘号原样保留")
+    ok("<b>重点</b>" in h8 and "<code>a * b * c</code>" in h8,
+       "公式、粗体与代码同时使用")
+    h9 = md_to_html("```text\n$$\na_i * b_i\n$$\n```\n\n正文 $n^2$。")
+    ok("math-block" not in h9 and "<p>正文 $n^2$。</p>" in h9,
+       "代码块内的公式定界符不启动公式块")
+    h10 = md_to_html("\\[\na_i < 10^9\n\\]\n\n正文。")
+    ok('math-block' not in h10, "反斜杠方括号不作为公式定界符")
+
+    print()
     print("================== 结果：%d 项通过，%d 项失败 ==================" % (PASS, FAIL))
     return 1 if FAIL else 0
 

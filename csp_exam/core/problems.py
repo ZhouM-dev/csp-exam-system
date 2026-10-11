@@ -198,8 +198,8 @@ def number_of_pid(pid: str, items: dict | None = None) -> str:
 def name_of_pid(pid: str, items: dict | None = None) -> str:
     """这道题**建题时填的默认英文名**（可留空）；没填过返回 ""。
 
-    它只是加进比赛时输入框的默认值 —— 学生真正看到的英文名在**本场** `exam.json`
-    的 `name` 字段里（老师配题时可以按本场情况改）。
+    加进比赛时用作默认值；后续修改会同步尚未结束且仍沿用旧默认值的场次。
+    学生真正使用的是本场 `name`（老师可以单独改）；已结束场次保留历史契约。
     """
     rec = (load_codes() if items is None else items).get(str(pid or "").strip()) or {}
     return str(rec.get("name") or "").strip()
@@ -376,7 +376,6 @@ def collect_samples(children: dict[str, str], pid: str) -> tuple[list[dict], lis
     notes: list[str] = []
     big_rels: dict[str, str] = {}
     small_rels: dict[str, str] = {}
-    prefix_low = tuple(s.lower() for s in SAMPLE_STEMS)
     for rel, full in children.items():
         parts = rel.split("/")
         base = os.path.basename(rel)
@@ -387,7 +386,7 @@ def collect_samples(children: dict[str, str], pid: str) -> tuple[list[dict], lis
         # ② 题目样例：文件名以 样例/sample/ex/example 开头（放在根目录或 data/ 下都认）
         if base.lower().endswith((".in", ".out", ".ans")):
             stem = base.rsplit(".", 1)[0].lower()
-            if stem.startswith(prefix_low):
+            if ip.is_sample_stem(stem):
                 small_rels[rel] = full
     # 大样例目录里的非数据文件（比如说明）也算
     big = _pair_up(big_rels) if big_rels else []
@@ -413,11 +412,15 @@ def detect_bundle(files: dict[str, bytes]) -> dict:
     found = ip.find_problem_dirs(bundle)
     problems = []
     for prefix, pid, title in found:
-        if prefix in ("", "."):
-            continue
         prob = ip.parse_problem(bundle, prefix, pid, title, {})
-        children = {n[len(prefix) + 1:]: n for n in bundle.names() if n.startswith(prefix + "/")}
+        children = ip.problem_children(bundle, prefix)
         big, small, notes = collect_samples(children, pid)
+        if prob.get("portable") is not None:
+            portable_items = prob["portable"]["samples"]
+            # The exact manifest is restored later; these lists only describe counts.
+            big = [i for i in portable_items if i["kind"] == "big"]
+            small = [i for i in portable_items if i["kind"] == "sample"]
+            notes = []
         prob["big_samples"] = big
         prob["samples"] = small
         prob["sample_notes"] = notes
@@ -498,8 +501,8 @@ def save_samples(pid: str, groups: list[dict], files: dict[str, bytes],
                 n_bytes += len(files[full])
                 entry["files"].append({"name": name, "size": len(files[full]), "role": "other"})
             items.append(entry)
-    with open(os.path.join(root, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump({"pid": pid, "items": items}, f, ensure_ascii=False, indent=2)
+    from . import store
+    store._save(os.path.join(root, "manifest.json"), {"pid": pid, "items": items})
     return {"items": items, "files": n_files, "bytes": n_bytes, "dir": root}
 
 
@@ -507,13 +510,8 @@ def load_samples(pid: str, base_dir: str = "") -> dict:
     """读某个题目已存的大样例/样例清单（学生下载页用）。"""
     root = _samples_root(pid, base_dir)
     path = os.path.join(root, "manifest.json")
-    if not os.path.isfile(path):
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return {}
+    from . import store
+    data = store._load(path, dict)
     # 只保留文件还在的条目
     items = []
     for it in data.get("items") or []:
@@ -536,39 +534,27 @@ def sample_path(pid: str, name: str, base_dir: str = "") -> str | None:
 
 
 def unpack(files: dict[str, bytes]) -> tuple[dict[str, bytes], list[str]]:
-    """把上传的东西摊平成 {相对路径: 内容}。zip 会被解开。
-
-    返回 (摊平后的文件, 提示信息)。
-    """
-    out: dict[str, bytes] = {}
-    notes: list[str] = []
-    # 上传里**已经有目录结构**（选了整个出题文件夹）时，里面的 zip 一律**不当数据**：
-    # 出题文件夹里常带着 `XX-洛谷上传.zip`（或别的备份包），那是给别的平台用的，
-    # 展开它会把同一个题目认成两道（踩过：老师从本机工具传题，识别到 2 道、还都写盘失败）。
-    # 单独传一个 zip（手选打包好的题）时没有目录结构，照旧展开。
+    from .archive import read_zip, safe_name
+    from ..config import MAX_PS_UPLOAD
+    out, notes = {}, []
     has_dirs = any("/" in k.replace("\\", "/").strip("/") for k in files)
     for name, data in files.items():
-        clean = name.replace("\\", "/").lstrip("/")
+        clean = safe_name(name)
         if clean.lower().endswith(".zip"):
             if has_dirs:
-                notes.append(f"{clean} 是压缩包，里面已经有整个文件夹了，跳过它")
+                notes.append(f"{clean} 是文件夹内的备份压缩包，未展开")
                 continue
-            try:
-                with zipfile.ZipFile(io.BytesIO(data)) as z:
-                    for info in z.infolist():
-                        if info.is_dir():
-                            continue
-                        inner = info.filename.replace("\\", "/").lstrip("/")
-                        if "__MACOSX" in inner or inner.startswith("."):
-                            continue
-                        out[inner] = z.read(info)
-                notes.append(f"{clean} 是 zip，已展开")
-            except zipfile.BadZipFile:
-                notes.append(f"{clean} 不是有效的 zip，已忽略")
-            continue
-        if clean.startswith(".") or "__MACOSX" in clean:
-            continue
-        out[clean] = data
+            added = read_zip(data)
+            notes.append(f"{clean} 是 zip，已展开")
+        else:
+            if "__MACOSX" in clean.split("/") or clean.rsplit("/", 1)[-1] == ".DS_Store":
+                continue
+            added = {clean: data}
+        if out.keys() & added.keys():
+            raise ValueError("上传的多个文件或压缩包包含重复路径。")
+        out.update(added)
+        if len(out) > 20000 or sum(map(len, out.values())) > MAX_PS_UPLOAD:
+            raise ValueError(f"单题文件超过 {MAX_PS_UPLOAD / 1048576:g} MiB 或 20000 个文件。")
     return out, notes
 
 
@@ -592,13 +578,19 @@ def pair_cases(files: dict[str, bytes]) -> tuple[list[dict], list[str]]:
         for base, path in names.items():
             low = base.lower()
             if low.endswith(".in"):
-                ins[base[: -len(".in")]] = path
+                stem = base[: -len(".in")]
+                if stem in ins:
+                    problems.append(f"{path}（重复输入，与 {ins[stem]} 冲突）")
+                ins[stem] = path
         outs = {}
         for base, path in names.items():
             low = base.lower()
             for ext in (".out", ".ans"):
                 if low.endswith(ext):
-                    outs[base[: -len(ext)]] = path
+                    stem = base[: -len(ext)]
+                    if stem in outs:
+                        problems.append(f"{path}（重复答案，与 {outs[stem]} 冲突）")
+                    outs[stem] = path
                     break
         for stem in sorted(ins, key=_natural_key):
             out_rel = outs.pop(stem, None)
@@ -658,13 +650,10 @@ def drop_problem_cache(pid: str) -> list[str]:
     if not judge_local.valid_pid(pid):
         raise ValueError("题目标识无效")
     gone = []
-    stmt = os.path.join(store.DATA_DIR, "statements", f"{pid}.md")
-    if os.path.isfile(stmt):
-        try:
-            os.remove(stmt)
-            gone.append("题面缓存")
-        except OSError:
-            pass
+    from . import database
+    if database.delete_statement(store.DATA_DIR, pid):
+        gone.append("题面缓存")
+    database.delete(store.DATA_DIR, "samples/" + pid)
     samples = os.path.join(store.DATA_DIR, "samples", pid)
     if os.path.isdir(samples):
         shutil.rmtree(samples, ignore_errors=True)
@@ -678,6 +667,17 @@ def _problem_write(fn):
     def locked(*args, **kwargs):
         from . import store
         with store._LOCK:
+            return fn(*args, **kwargs)
+    return locked
+
+
+def _metadata_write(fn):
+    """Commit registry, library metadata and inherited exam names together."""
+    from functools import wraps
+    @wraps(fn)
+    def locked(*args, **kwargs):
+        from . import database, store
+        with store._LOCK, database.transaction(store.DATA_DIR):
             return fn(*args, **kwargs)
     return locked
 
@@ -712,13 +712,21 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
     name = (name or code or "").strip()
     files, notes = unpack(uploads)
     problems: list[str] = []
+    if type(time_ms) is not int or type(memory_mb) is not int or time_ms <= 0 or memory_mb <= 0:
+        return {"ok": False, "error": "时限和内存必须是正整数。", "notes": notes}
 
     # 先看是不是出题工程结构：是的话，题目标识/标题/题面/标程/数据/大样例都听它的
     det = detect_bundle(files)
     prob = det["problems"][0] if det["count"] == 1 else None
     sample_info = {}
     if prob:
-        cases = [{"name": str(i), "in": c[1], "out": c[2]}
+        if prob.get("errors"):
+            return {"ok": False, "pid": pid or prob["pid"], "error": "；".join(prob["errors"]), "notes": notes}
+        config = prob.get("config") or {}
+        time_ms = config.get("time_ms", time_ms)
+        memory_mb = config.get("memory_mb", memory_mb)
+        name = name or config.get("name", "")
+        cases = [{"name": str(c[0]) if prob.get("portable") is not None else str(i), "in": c[1], "out": c[2]}
                  for i, c in enumerate(prob["cases"], 1)]
         if not pid:
             pid = prob["pid"]                    # 没填标识就用分类号（题库内部标识）
@@ -736,6 +744,8 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
                                       "用文件夹上传时会自动取「分类号-题名」里的分类号",
                 "notes": notes}
     title = title or pid
+    if any("有答案" in item or "重复" in item for item in problems):
+        return {"ok": False, "error": "；".join(problems), "notes": notes}
     if not cases:
         return {"ok": False,
                 "error": "没有配出任何测试点：请上传成对的 .in/.out（或 .in/.ans）文件，"
@@ -784,8 +794,10 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
         return {"ok": False, "error": "测试点缺少标准答案，题目没有改动。", "pid": pid}
     # ---- 题目编号：建题时由系统分配（T00001，跟着题走）；英文名记成默认值
     try:
+        previous_name = str((load_problem_info().get(pid) or {}).get("name") or name_of_pid(pid))
+        store.sync_problem_name(pid, name, previous_name, dry_run=True)
         number = assign_number(pid, title=title, name=name)
-    except CodeError as e:
+    except (CodeError, ValueError) as e:
         return {"ok": False, "error": str(e), "pid": pid, "number": "", "name": "",
                 "code": "", "notes": notes, "cases": len(cases)}
 
@@ -817,12 +829,29 @@ def create_problem(pid: str, title: str, uploads: dict[str, bytes], *,
     }
     # 大样例 / 题目样例：存到考试服务这边，学生能在考试页下载（Hydro 那边不加，
     # 免得样例被当成评测数据参与计分）
-    if prob and (prob["big_samples"] or prob["samples"]):
+    if ok and prob and prob.get("portable") is not None:
+        from .problem_export import restore_samples
+        sample_info = restore_samples(pid, prob["portable"]["samples"], files,
+                                      ip.problem_children(MemoryBundle(files), prob["prefix"]))
+        out["samples"] = sample_info
+    elif ok and prob and (prob["big_samples"] or prob["samples"]):
         sample_info = save_samples(pid, [prob["big_samples"], prob["samples"]], files)
         out["samples"] = sample_info
     if ok:
         remember_problem(pid, title=title, code=number, name=name, cases=len(cases),
                          time_ms=time_ms, memory_mb=memory_mb, std=std_source)
+        if prob and prob.get("portable") is not None:
+            # An exported empty standard solution must clear any prior solution.
+            from . import database
+            with database.transaction(store.DATA_DIR):
+                items = load_problem_info()
+                items[pid]["std"] = std_source
+                items[pid]["name"] = name
+                save_problem_info(items)
+                codes = load_codes()
+                codes[pid]["name"] = name
+                save_codes(codes)
+                localoj.set_problem_statement(pid, statement)
         if exists:
             store.invalidate_problem_results(pid, "题目数据已更新，请重测")
         try:      # 导入成功后刷新题库缓存，配题时立刻能搜到
@@ -863,7 +892,7 @@ def create_bundle(uploads: dict[str, bytes], *, time_ms: int = DEFAULT_TIME_MS,
             continue
         if on_site is None and not overwrite:
             on_site = localoj.problem_pids()
-        one_files = {k: v for k, v in files.items() if k.startswith(prob["prefix"] + "/")}
+        one_files = {k: files[k] for k in ip.problem_children(MemoryBundle(files), prob["prefix"]).values()}
         got = create_problem(prob["pid"], prob["title"], one_files,
                              time_ms=time_ms, memory_mb=memory_mb,
                              statement=statement, overwrite=overwrite, tags=tags,
@@ -891,6 +920,7 @@ if __name__ == "__main__":      # 手工调试用
     raise SystemExit(0 if len(sys.argv) == 1 else 2)
 
 
+@_metadata_write
 def remember_problem(pid: str, *, title: str = "", code: str = "", name: str = "", cases=None,
                      time_ms=None, memory_mb=None, std: str = "") -> None:
     """建题成功后记下这道题的元信息（空值不覆盖已有的）。
@@ -903,6 +933,8 @@ def remember_problem(pid: str, *, title: str = "", code: str = "", name: str = "
     from . import store
     with store._LOCK:
         items = load_problem_info()
+        previous_title = str((items.get(pid) or {}).get('title') or '')
+        previous_name = str((items.get(pid) or {}).get('name') or '')
         rec = dict(items.get(pid) or {})
         if title:
             rec["title"] = str(title)
@@ -926,6 +958,10 @@ def remember_problem(pid: str, *, title: str = "", code: str = "", name: str = "
                 for r in store.load_results(c["id"]).values()):
             raise OSError("这道题正在评测，请等评测完成再修改限额。")
         items[pid] = rec
+        if name and name != previous_name:
+            store.sync_problem_name(pid, str(name), previous_name)
         save_problem_info(items)
+        if title and title != previous_title:
+            store.sync_problem_title(pid, str(title), previous_title)
         if limits_changed:
             store.invalidate_problem_results(pid, "题目评测限额已更新，请重测")

@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""本地判题引擎：编译 + 逐点跑 + 比对，产出与原来 Hydro 记录**同形状**的结果。
+"""本地题库与 HydroJudge 入口。编译、运行、检查答案和逐点判定交给原版 HydroJudge。
 
-和 Hydro 的关系：以前编译、跑数据、比对都交给 Hydro，我们只读它的记录；
-现在这三件事由这里做（沙箱是 `gojudge.py` 那套），好处是**判分口径完全由我们定**，
-尤其是文件输入输出（CSP 的 freopen）这条 —— 以前靠"给学生的代码包一层 freopen 垫片"
-去迁就评测机只喂 stdin，包与不包结果就不一样（线上踩过，老师也反馈过）。
-
-题目数据从这一版起放在本地：`data/problems/<pid>/testdata/*.in|*.out`
-（从 Hydro 迁出来，见 `tests/_migrate_from_hydro.py`；题面在 `data/statements/<pid>.md`）。
-
-三种输入输出口径（`io_mode`）：
-
-* `auto`   —— 仅供兼容测试，文件输出优先，再看标准输出；正式 CSP 不使用。
-* `file`   —— 严格 CSP 口径：答案必须在 `<英文名>.out` 里，光往标准输出打印不算。
-  想"按真实考场判"就用它（旧垫片做不到这一点）。
-* `stdin`  —— 不往沙箱里放输入文件，只喂标准输入（OI / IOI 赛制：程序本来就该读写标准输入输出）。
+平台负责数据校验与结果格式转换，不维护另一套判题器，也不自动回退。
+file 模式使用题目指定的 .in/.out 文件；stdin 模式使用标准输入输出。
 """
 
 from __future__ import annotations
@@ -27,42 +15,13 @@ import time
 
 from . import gojudge
 from .util import log
+from ..config import DATA_DIR
 
 #: 题目数据目录（本地题目库）
-PROBLEMS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "..", "data", "problems")
-PROBLEMS_DIR = os.path.normpath(PROBLEMS_DIR)
+PROBLEMS_DIR = os.path.join(DATA_DIR, "problems")
 
-#: 沙箱里干活的地方（挂载配置里的 tmpfs）
-WORK = "/w"
-
-#: go-judge 的状态串 → 考试服务沿用的状态码（见 judge_result.STATUS）
-_STATUS_MAP = {
-    "Accepted": 1,
-    "Time Limit Exceeded": 3,
-    "Memory Limit Exceeded": 4,
-    "Output Limit Exceeded": 5,
-    "Nonzero Exit Status": 6,
-    "Signalled": 6,
-    "Dangerous Syscall": 6,          # 碰了沙箱不允许的系统调用：算运行错误
-    "File Error": 8,
-    "Internal Error": 8,
-}
-#: 我们自己的状态码（与 judge_result.STATUS 对齐，页面/成绩表都认这几个数）
 ST_AC, ST_WA, ST_TLE, ST_MLE, ST_OLE, ST_RE, ST_CE, ST_SE = 1, 2, 3, 4, 5, 6, 7, 8
-
-#: 编译限额（编译也在沙箱里跑）
-COMPILE_CPU_MS = 30000
-COMPILE_MEM_MB = 2048
-
-#: 支持的语言 → (编译器, 额外参数)
-LANGS = {
-    ".cpp": ("/usr/bin/g++", ["-O2", "-std=c++14", "-static"]),
-    ".cc": ("/usr/bin/g++", ["-O2", "-std=c++14", "-static"]),
-    ".cxx": ("/usr/bin/g++", ["-O2", "-std=c++14", "-static"]),
-    ".c++": ("/usr/bin/g++", ["-O2", "-std=c++14", "-static"]),
-    ".c": ("/usr/bin/gcc", ["-O2", "-std=c11", "-static"]),
-}
+LANGS = {'.cpp', '.cc', '.cxx', '.c++', '.c'}
 
 
 # ------------------------------------------------------------------ 题目数据
@@ -215,10 +174,8 @@ def store_problem(pid: str, cases: list[dict], statement: str = "") -> dict:
         shutil.rmtree(stage, ignore_errors=True)
     if statement and statement.strip():
         from . import store as _store
-        sp = os.path.join(_store.DATA_DIR, "statements", f"{pid}.md")
-        os.makedirs(os.path.dirname(sp), exist_ok=True)
-        with open(sp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(statement)
+        from . import database
+        database.save_statement(_store.DATA_DIR, pid, statement)
     return {"cases": len(cases), "bytes": total, "dir": d}
 
 
@@ -231,13 +188,9 @@ def drop_problem_data(pid: str) -> list:
         shutil.rmtree(d, ignore_errors=True)
         gone.append("测试点")
     from . import store as _store
-    sp = os.path.join(_store.DATA_DIR, "statements", f"{pid}.md")
-    if os.path.isfile(sp):
-        try:
-            os.remove(sp)
-            gone.append("题面")
-        except OSError:
-            pass
+    from . import database
+    if database.delete_statement(_store.DATA_DIR, pid):
+        gone.append("题面")
     return gone
 
 
@@ -252,38 +205,6 @@ def problem_ready(pid: str) -> tuple[bool, str]:
         return False, (f"{len(cs)} 个测试点，其中 {len(no_ans)} 个没有答案"
                        f"（{'、'.join(no_ans[:5])}）：请补齐后评测")
     return True, f"{len(cs)} 个测试点，数据齐"
-
-
-# ------------------------------------------------------------------ 比对
-
-def norm_output(text):
-    """把输出归一成"按 CSP 口径比较"的样子（题目须知 §8.2/§8.3）。
-
-    逐行去掉**行末**空白；去掉文尾的空行；行首空白**不动**（行首多空格要算错）。
-    行末空格与文件末尾回车的有无不影响正确性 —— 这条是考区明文写的，
-    所以归一之后再全文比较。
-    """
-    if isinstance(text, bytes):
-        lines = [ln.rstrip(b" ") for ln in text.replace(b"\r\n", b"\n").split(b"\n")]
-        while lines and not lines[-1]:
-            lines.pop()
-        return b"\n".join(lines)
-    lines = [ln.rstrip(" ") for ln in (text or "").replace("\r\n", "\n").split("\n")]
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines)
-
-
-def compare(got, want) -> bool:
-    """答案比对（CSP 口径）。"""
-    if isinstance(got, bytes) or isinstance(want, bytes):
-        got = got.encode("utf-8") if isinstance(got, str) else got
-        want = want.encode("utf-8") if isinstance(want, str) else want
-    return norm_output(got) == norm_output(want)
-
-
-def _decode(b: bytes) -> str:
-    return (b or b"").decode("utf-8", "replace")
 
 
 # ------------------------------------------------------------------ 判一道题
@@ -303,7 +224,7 @@ def _judge_source_locked(pid, source, ext, *, code, full, time_ms, memory_mb, io
     row 里这些字段是上游在用的（`grading._apply_result` / `_norm_case`）：
         status          整数状态码（1 通过 / 2 答案错误 / 3 超时 / 4 内存 / 6 运行错误 / 7 编译错误 / 8 系统错误）
         testcases       逐点明细（每点带 score —— 按点给分靠它，缺了总分就是 0）
-        time / memory   最慢点毫秒 / 峰值 KB（与 Hydro 口径一致：毫秒、KB）
+        time / memory   测试点 CPU 总时间毫秒 / 峰值 KB（与 Hydro 口径一致：毫秒、KB）
         compilerTexts   编译报错原文（管理端「编译错误时直接给报错」）
         note            不该算分的失败（编译不过、本机没数据…）——有它就不计提交次数
     """
@@ -326,7 +247,7 @@ def _judge_source_locked(pid, source, ext, *, code, full, time_ms, memory_mb, io
                 "testcases": []}
     if ext not in LANGS:
         return {"status": ST_CE, "score": 0,
-                "note": f"暂不支持 {ext or '这种'} 语言（本机判题器目前支持 C/C++）",
+                "note": f"暂不支持 {ext or '这种'} 语言（当前 HydroJudge 配置支持 C/C++）",
                 "testcases": []}
 
     # 每个测试点的满分：满分 ÷ 点数，余数摊给前面几个点（与 grading._point_scores 一致）
@@ -339,7 +260,8 @@ def _judge_source_locked(pid, source, ext, *, code, full, time_ms, memory_mb, io
         effective_ms, profile = judge_profile.effective_limit(time_ms, profile=profile)
         if int(memory_mb) <= 0:
             raise ValueError("题目内存限制必须大于零")
-        row = _judge_inner(pid, source, ext, cases, per, code=code, time_ms=effective_ms,
+        from . import hydro_client
+        row = hydro_client.judge(pid, source, ext, cases, per, code=code, time_ms=effective_ms,
                            memory_mb=memory_mb, io_mode=io_mode)
         row["environment"] = environment
         row["official_time_ms"] = int(time_ms)
@@ -354,129 +276,16 @@ def _judge_source_locked(pid, source, ext, *, code, full, time_ms, memory_mb, io
     return row
 
 
-def _judge_inner(pid, source, ext, cases, per, *, code, time_ms, memory_mb, io_mode) -> dict:
-    cc, flags = LANGS[ext]
-    # ---- 编译（一次；产物留在沙箱仓库里，后面每个点直接引用）
-    if not code or not re.fullmatch(r"[a-z0-9_]{1,32}", code):
-        raise gojudge.GoJudgeError("题目英文名不安全")
-    src_name = code + ext
-    src_id = gojudge.prepare(source.encode("utf-8") if isinstance(source, str) else source)
-    try:
-        r = gojudge.run([cc, *flags, src_name, "-o", code],
-                        copy_in={src_name: {"fileId": src_id}},
-                        cpu_ms=COMPILE_CPU_MS, clock_ms=COMPILE_CPU_MS + 20000,
-                        memory_mb=COMPILE_MEM_MB, stack_mb=COMPILE_MEM_MB, cached=[code])
-    finally:
-        gojudge.drop(src_id)
-    cerr = (r.get("files") or {}).get("stderr", b"")
-    if r.get("status") != "Accepted" or code not in (r.get("fileIds") or {}):
-        for fid in (r.get("fileIds") or {}).values():
-            gojudge.drop(fid)
-        return {"status": ST_CE, "score": 0,
-                "note": "编译错误" if r.get("status") == "Accepted" else
-                        f"编译失败（{r.get('status')}）",
-                "compilerTexts": [_decode(cerr)[:4000]],
-                "testcases": []}
-    binary = r["fileIds"][code]
-
-    # ---- 逐点跑
-    rows, slowest, peak = [], 0, 0
-    try:
-      for i, c in enumerate(cases):
-        got, st, t_ms, mem_kb, extra = _run_case(binary, c, code=code, time_ms=time_ms,
-                                                 memory_mb=memory_mb, io_mode=io_mode)
-        ans = _decode(c["out"]) if c["out"] is not None else ""
-        if st == ST_AC and c["out"] is not None and not compare(got, c["out"]):
-            st = ST_WA
-        if c["out"] is None and st == ST_AC:
-            st = ST_WA               # 没有答案的点：对任何输出都算错（与旧系统一致）
-        rows.append({
-            "no": c["name"], "status": st, "score": int(per[i]) if st == ST_AC else 0,
-            "time": t_ms, "memory": mem_kb,
-            "input": _decode(c["in"])[:4096],
-            "output": (_decode(got) if isinstance(got, bytes) else got)[:4096],
-            "answer": ans[:4096],
-            **extra,
-        })
-        slowest = max(slowest, t_ms)
-        peak = max(peak, mem_kb)
-    finally:
-        gojudge.drop(binary)
-
-    passed = sum(1 for x in rows if x["status"] == ST_AC)
-    score = sum(int(x["score"]) for x in rows)
-    # 整题状态：全过=通过；有点过=部分正确（沿用旧系统的"按点给分"显示）；
-    # 一个没过时，用**第一个失败点的状态**（学生/老师看的是"为什么没过"）
-    if any(x["status"] == ST_SE for x in rows):
-        status = ST_SE
-    elif passed == len(rows):
-        status = ST_AC
-    else:
-        status = next((x["status"] for x in rows if x["status"] != ST_AC), ST_WA)
-    return {"status": status, "score": score, "testcases": rows,
-            "time": slowest, "memory": peak,
-            "note": "测试点执行发生系统错误，需重测" if status == ST_SE else "",
-            "passed": passed, "total": len(rows)}
-
-
-def _run_case(binary: str, case: dict, *, code: str, time_ms: int, memory_mb: int,
-              io_mode: str) -> tuple[bytes, int, int, int, dict]:
-    """直接运行选手程序；答案原始字节取回，CSP 不给标准输入兜底。"""
-    from . import store
-    if not store.valid_code(code) or io_mode not in ("file", "stdin", "auto"):
-        raise gojudge.GoJudgeError("不安全的题目英文名或 I/O 配置")
-    infile, outfile = code + ".in", code + ".out"
-    input_id = gojudge.prepare(case["in"])
-    cached_ids = []
-    try:
-        copy_in = {code: {"fileId": binary}}
-        if io_mode != "stdin":
-            copy_in[infile] = {"fileId": input_id}
-        stdin = {"content": ""} if io_mode == "file" else {"fileId": input_id}
-        r = gojudge.run(["./" + code], copy_in=copy_in,
-                        files=[stdin, {"name": "stdout", "max": 64 * 1024 * 1024},
-                               {"name": "stderr", "max": 1024 * 1024}],
-                        cpu_ms=int(time_ms), clock_ms=int(time_ms) * 3 + 3000,
-                        memory_mb=int(memory_mb), stack_mb=int(memory_mb),
-                        proc_limit=1, copy_out=["stderr"],
-                        cached=["stdout", outfile + "?"] if io_mode != "stdin" else ["stdout"])
-        ids = r.get("fileIds") or {}
-        cached_ids.extend(ids.values())
-        st = _STATUS_MAP.get(str(r.get("status")), ST_SE)
-        if any(e.get("type") in ("CopyOutSizeExceeded", "CollectSizeExceeded")
-               for e in r.get("fileError", [])):
-            st = ST_OLE
-        if st == ST_AC and int(r.get("time") or 0) > int(time_ms) * 10**6:
-            st = ST_TLE
-        if st == ST_AC and int(r.get("memory") or 0) > int(memory_mb) * 1024 * 1024:
-            st = ST_MLE
-        extra = {}
-        chosen = outfile if io_mode != "stdin" and outfile in ids else "stdout"
-        if io_mode == "file" and outfile not in ids and st == ST_AC:
-            st = ST_WA
-            extra["message"] = f"没有生成 {outfile}，CSP 要求使用文件输入输出"
-        got = gojudge.fetch(ids[chosen]) if chosen in ids else b""
-        err = _decode((r.get("files") or {}).get("stderr", b""))
-        if err:
-            extra.setdefault("message", err[:500])
-        return (got, st, int(round(int(r.get("time") or 0) / 1e6)),
-                int(round(int(r.get("memory") or 0) / 1024)), extra)
-    finally:
-        gojudge.drop(input_id)
-        for fid in cached_ids:
-            gojudge.drop(fid)
-
-
 def selftest() -> dict:
     """自检：引擎本身对不对（不需要题目数据，现造两个点）。
 
     要盖住：AC、WA、TLE、编译错误，以及** freopen 与不用 freopen 两种写法在
-    auto/file 两种口径下的差别**——这正是老师反馈"结果不一样"的地方。
+    stdin/file 两种口径下的差别**——这正是老师反馈"结果不一样"的地方。
     """
-    import tempfile
     ok_all = True
     checks = []
-    pid = "_selftest"
+    import uuid
+    pid = "_selftest_" + uuid.uuid4().hex[:12]
     d = cases_dir(pid)
     os.makedirs(d, exist_ok=True)
     try:
@@ -496,7 +305,7 @@ def selftest() -> dict:
                       'printf("%d\\n",a+b);return 0;}\n')
         WRONG = ('#include <cstdio>\nint main(){int a,b;scanf("%d %d",&a,&b);'
                  'printf("%d\\n",a*b);return 0;}\n')
-        TLE = ('#include <cstdio>\nint main(){for(;;);return 0;}\n')
+        TLE = ('#include <cstdio>\nint main(){freopen("candy.out","w",stdout);for(;;);return 0;}\n')
         CE = 'int main(){this is not c++}\n'
 
         def one(src, label, **kw):
@@ -506,10 +315,6 @@ def selftest() -> dict:
             checks.append((label, row))
             return row
 
-        r = one(AC_STDIN, "标准输入输出（auto）", io_mode="auto")
-        ok_all &= r["status"] == ST_AC and r["score"] == 100
-        r = one(AC_FREOPEN, "自己 freopen（auto）", io_mode="auto")
-        ok_all &= r["status"] == ST_AC and r["score"] == 100
         r = one(WRONG, "答案错", io_mode="stdin")
         ok_all &= r["status"] == ST_WA and r["score"] == 0
         r = one(TLE, "死循环 → 超时")
@@ -520,7 +325,7 @@ def selftest() -> dict:
         ok_all &= r["status"] != ST_AC and r["score"] == 0
         r = one(AC_FREOPEN, "自己 freopen，严格文件口径 → 满分", io_mode="file")
         ok_all &= r["status"] == ST_AC and r["score"] == 100
-        r = one(AC_FREOPEN, "自己 freopen，标准输入输出口径 → 读不到文件（超时或运行错误）",
+        r = one(AC_FREOPEN, "自己 freopen，标准输入输出口径 → 不能通过",
                 io_mode="stdin")
         ok_all &= r["status"] != ST_AC
         r = one(AC_STDIN, "标准输入输出（stdin 口径）", io_mode="stdin")

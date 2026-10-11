@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 
+from csp_exam.tests.live_hydro_fixture import live_hydro_fixture
 from csp_exam.core import gojudge, judge_profile, judgelocal, store
 
 
@@ -12,11 +13,11 @@ def main():
     checks = []
     def check(name, ok, details=""):
         checks.append({"name": name, "ok": bool(ok), "details": details})
-    with tempfile.TemporaryDirectory(prefix="csp-sandbox-regression-") as tmp, \
+    with live_hydro_fixture(prefix="csp-sandbox-regression-") as tmp, \
             patch.object(store, "DATA_DIR", tmp), \
             patch.object(judgelocal, "PROBLEMS_DIR", str(Path(tmp) / "problems")):
         environment = gojudge.ensure_ready()
-        check("官方镜像编译器 / cgroup / seccomp", bool(environment), environment)
+        check("G++ 9.3 / cgroup / 执行身份 / NoNewPrivs", bool(environment), environment)
         basic = judgelocal.selftest()
         for name, r in basic["checks"]:
             check(name, basic["ok"], {"status": r["status"], "score": r.get("score"), "note": r.get("note")})
@@ -27,14 +28,14 @@ def main():
         stack = '#include <cstdio>\nint main(){volatile char a[16*1024*1024]; for(int i=0;i<sizeof(a);i++)a[i]=i; FILE*f=fopen("candy.out","w");fprintf(f,"ok\\n");fclose(f);return a[0];}'
         r = judge(stack)
         check("16 MiB 栈在 512 MiB 限额内通过", r["status"] == 1, {"status": r["status"], "memory_kb": r.get("memory")})
-        memory = '#include <cstdio>\n#include <cstdlib>\nint main(){volatile char*p=(char*)malloc(64*1024*1024);if(!p)return 1;for(int i=0;i<64*1024*1024;i++)p[i]=i;FILE*f=fopen("candy.out","w");fprintf(f,"ok\\n");fclose(f);return p[0];}'
+        memory = '#include <cstdio>\n#include <cstdlib>\nint main(){FILE*f=fopen("candy.out","w");volatile char*p=(char*)malloc(64*1024*1024);if(!p)return 1;for(int i=0;i<64*1024*1024;i++)p[i]=i;fprintf(f,"ok\\n");fclose(f);return p[0];}'
         r = judge(memory, memory=32)
-        check("触碰 64 MiB 堆受 32 MiB 内存限制", r["status"] == 4, {"status": r["status"], "memory_kb": r.get("memory")})
-        r = judge('int main(){for(;;);}', time=200)
+        check("64 MiB 分配受 32 MiB 限制：MLE 或分配失败 RE", r["status"] in (4,6) and r.get('score')==0, {"status": r["status"], "memory_kb": r.get("memory")})
+        r = judge('#include <cstdio>\nint main(){freopen("candy.out","w",stdout);for(;;);}', time=200)
         check("200 ms CPU 超时", r["status"] == 3, {"status": r["status"], "time_ms": r.get("time")})
         nofile = '#include <cstdio>\nint main(){printf("ok\\n");}'
         r = judge(nofile)
-        check("正确标准输出不能冒充 CSP 答案文件", r["status"] == 2 and r["score"] == 0)
+        check("正确标准输出不能冒充 CSP 答案文件", r["status"] == 6 and r["score"] == 0)
         src = '#include <cstdio>\nint main(){FILE*f=fopen("candy.out","wb");fputc(255,f);fclose(f);return 0;}'
         judgelocal.store_problem("P", [{"name": "1", "in": b"", "out": b"\xfe"}])
         r = judge(src)
@@ -52,7 +53,7 @@ def main():
         sid, bid = gojudge.prepare(src.encode()), ""
         try:
             c = gojudge.run(["/usr/bin/g++", "-O2", "-std=c++14", "-static", "candy.cpp", "-o", "candy"],
-                            copy_in={"candy.cpp": {"fileId": sid}}, cpu_ms=30000, memory_mb=2048, cached=["candy"])
+                            copy_in={"candy.cpp": {"fileId": sid}}, cpu_ms=30000, memory_mb=1024, cached=["candy"])
             bid = (c.get("fileIds") or {}).get("candy", "")
             elf = gojudge.run(["/usr/bin/readelf", "-l", "candy"], copy_in={"candy": {"fileId": bid}})
             check("静态链接 ELF", bid and b"INTERP" not in elf["files"]["stdout"])

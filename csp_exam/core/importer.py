@@ -112,17 +112,8 @@ class Bundle:
         if self.is_zip:
             self._zf = zipfile.ZipFile(source)
             try:
-                total = 0
-                for member in self._zf.infolist():
-                    if member.is_dir(): continue
-                    name = member.filename.replace("\\", "/")
-                    if name.startswith("/") or ":" in name or ".." in name.split("/") or "\x00" in name:
-                        raise ValueError("题单 zip 包含越界文件名")
-                    if name in self._members: raise ValueError("题单 zip 包含重复文件名")
-                    self._members[name] = member
-                    total += member.file_size
-                    if len(self._members) > 20000 or total > 512 * 1024 * 1024:
-                        raise ValueError("题单解压后超过 512MB 或 20000 个文件")
+                from .archive import members
+                self._members = members(self._zf, max_files=20000, max_bytes=512 * 1024 * 1024)
                 self._names = list(self._members)
             except Exception:
                 self._zf.close()
@@ -161,48 +152,37 @@ class Bundle:
 # ---------------------------------------------------------------- 题单解析
 
 
+def problem_children(bundle, prefix):
+    head = prefix + "/" if prefix else ""
+    return {n[len(head):]: n for n in bundle.names() if n.startswith(head)}
+
+
+def is_sample_stem(stem):
+    return bool(re.fullmatch(r"(?:样例|sample|example|ex)(?:[_-]?\d+)?", stem, re.I))
+
+
 def find_problem_dirs(bundle: Bundle) -> list[tuple[str, str, str]]:
-    """找出所有题目目录，返回 [(目录前缀, 分类号, 题名)]。
-
-    优先按「分类号-题名」识别；同时兼容"目录里有 data/*.in 但没有分类号"的普通题包。
-    """
-    names = bundle.names()
-    prefixes: dict[str, set[str]] = {}
-    for n in names:
+    prefixes = {""}
+    for n in bundle.names():
         parts = n.split("/")
-        # 从最深的父目录往上找，取真正含题的那个目录
-        for depth in range(len(parts) - 1, 0, -1):
-            prefix = "/".join(parts[:depth])
-            prefixes.setdefault(prefix, set()).add("/".join(parts[depth:]))
-
-    # 只保留"含题面或含数据"的目录，且取最浅的那个（避免把子目录也当成题）
-    found: dict[str, tuple[str, str]] = {}
-    for prefix, children in sorted(prefixes.items()):
-        # 只认「直接放在这个目录里」的特征文件——否则外层容器（题目库/）会因为
-        # 里面有 "G01-x/01.in" 这种带斜杠的子路径而被误判成一道题，
-        # 进而把真正的题目目录当成"更深的子目录"过滤掉（踩过：整包只识别出一道 P 题）。
-        direct = {c for c in children if "/" not in c}
-        has_stmt = any(c in STATEMENT_NAMES for c in direct)
-        has_std = any(c in STD_NAMES for c in direct)
-        has_data = any(c.endswith(".in") for c in direct) or any(
-            c in DATA_DIRS for c in direct)
-        if not (has_stmt or has_data or has_std):
+        prefixes.update("/".join(parts[:depth]) for depth in range(1, len(parts)))
+    found = {}
+    for prefix in sorted(prefixes):
+        children = problem_children(bundle, prefix)
+        direct = {c.lower() for c in children if "/" not in c}
+        has_stmt = bool(direct & {s.lower() for s in STATEMENT_NAMES[:-1]})
+        has_std = bool(direct & {s.lower() for s in STD_NAMES}) or any(n.endswith(".std.cpp") for n in direct)
+        has_data = any(n.lower().endswith(".in") and ("/" not in n or n.split("/")[0] in DATA_DIRS and n.count("/") == 1) for n in children)
+        if not (has_stmt or has_std or "problem.json" in direct or has_data and prefix):
             continue
-        base = os.path.basename(prefix)
+        base = os.path.basename(prefix) or "P"
         m = CLASS_CODE_RE.match(base)
-        if m:
-            found[prefix] = (m.group(1), m.group(2))
-        else:
-            # 没有分类号：用目录名当 pid（清洗成字母数字），题名就是目录名
-            pid = re.sub(r"[^0-9A-Za-z]+", "", base)[:20] or "P"
-            found[prefix] = (pid, base)
-
-    # 去掉被更浅目录包含的（比如 题目/D01-x/ 与 题目/D01-x/data/ 同时匹配）
+        found[prefix] = (m.group(1), m.group(2)) if m else (re.sub(r"[^0-9A-Za-z]+", "", base)[:20] or "P", base)
     result = []
     for prefix in sorted(found):
-        if any(prefix != other and prefix.startswith(other + "/") for other in found):
+        if any(prefix != other and (not other or prefix.startswith(other + "/")) for other in found):
             continue
-        result.append((prefix, found[prefix][0], found[prefix][1]))
+        result.append((prefix, *found[prefix]))
     return result
 
 
@@ -239,10 +219,7 @@ def parse_index(bundle: Bundle) -> dict[str, dict]:
 def parse_problem(bundle: Bundle, prefix: str, pid: str, title: str,
                   index_info: dict) -> dict:
     """解析单道题：题面、数据、标程。"""
-    children = {}
-    for n in bundle.names():
-        if n.startswith(prefix + "/"):
-            children[n[len(prefix) + 1:]] = n
+    children = problem_children(bundle, prefix)
 
     # ---- 题面
     statement = ""
@@ -254,27 +231,55 @@ def parse_problem(bundle: Bundle, prefix: str, pid: str, title: str,
             statement_from = cand
             break
 
-    # ---- 测试数据：data/ 或题目根目录下的 <数字>.in + 同名 .out
-    pairs: list[tuple[int, str, str]] = []
-    for dirname in ("",) + DATA_DIRS:
-        base = dirname + "/" if dirname else ""
-        got = []
-        for rel, full in children.items():
-            if not rel.startswith(base):
-                continue
-            tail = rel[len(base):]
-            if "/" in tail:                     # 只看这一层，别钻子目录（大样例等）
-                continue
-            m = CASE_FILE_RE.match(tail)
-            if not m:
-                continue
-            num = int(m.group(1))
-            out_rel = base + os.path.splitext(tail)[0] + ".out"
-            if out_rel in children:
-                got.append((num, full, children[out_rel]))
-        if got:
-            pairs = sorted(got)
-            break
+    # Complete pairs in every declared data directory; never silently drop an orphan.
+    from .problems import pair_cases
+    data_files = {}
+    for rel, full in children.items():
+        parts = rel.split("/")
+        stem, ext = os.path.splitext(parts[-1])
+        if ext.lower() not in (".in", ".out", ".ans"):
+            continue
+        if is_sample_stem(stem):
+            continue
+        if len(parts) == 1 or len(parts) == 2 and parts[0] in DATA_DIRS:
+            data_files[rel] = bundle.read(full)
+    cases, issues = pair_cases(data_files)
+    errors = [f"缺少答案：{c['in']}" for c in cases if not c['out']]
+    errors.extend(x for x in issues if "没有对应" in x or "有答案" in x or "重复" in x)
+    pairs = [(i, children[c['in']], children[c['out']]) for i, c in enumerate(cases, 1) if c['out']]
+
+    portable = None
+    if "csp-package.json" in children:
+        from .problem_export import validate_package
+        try:
+            portable = validate_package(bundle, children)
+            pairs = portable["cases"]
+            errors = []  # Portable packages declare cases explicitly, including sample-like names.
+        except (ValueError, TypeError, KeyError, UnicodeError) as e:
+            errors.append("CSP 导出题包无效：" + str(e))
+
+    config = {}
+    if "problem.json" in children:
+        try:
+            config = json.loads(_decode(bundle.read(children["problem.json"])))
+            if not isinstance(config, dict):
+                raise ValueError("必须是 JSON 对象")
+            unknown = set(config) - {"id", "title", "name", "time_ms", "memory_mb", "case_count"}
+            if unknown:
+                raise ValueError("不支持的字段：" + ", ".join(sorted(unknown)))
+            for field in ("time_ms", "memory_mb", "case_count"):
+                if field in config and (type(config[field]) is not int or config[field] <= 0):
+                    raise ValueError(field + " 必须为正整数")
+            if "case_count" in config and config["case_count"] != len(pairs):
+                raise ValueError("声明的测试点数与实际完整数据不一致")
+            for field in ("id", "title", "name"):
+                if field in config and not isinstance(config[field], str):
+                    raise ValueError(field + " 必须是字符串")
+        except (ValueError, TypeError) as e:
+            errors.append("problem.json 无效：" + str(e))
+            config = {}
+    pid = config.get("id") or pid
+    title = config.get("title") or title
 
     # ---- 标程
     std_rel = ""
@@ -302,12 +307,12 @@ def parse_problem(bundle: Bundle, prefix: str, pid: str, title: str,
         "difficulty": difficulty_of(meta.get("难度", "")),
         "topics": split_topics(meta.get("考点", "")),
         "index_no": meta.get("编号", ""),
-        "warnings": [],
+        "warnings": [], "errors": errors, "config": config, "portable": portable,
     }
 
 
 def _decode(raw: bytes) -> str:
-    for enc in ("utf-8", "gbk"):
+    for enc in ("utf-8-sig", "gb18030"):
         try:
             return raw.decode(enc)
         except UnicodeDecodeError:
@@ -333,6 +338,7 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
 
     返回报告：{"total": N, "imported": [...], "skipped": [...], "failed": [...], "problems": [...]}
     """
+    from . import store
     from .store import valid_name
     from . import problems as _mk          # 延迟导入：编号分配/校验的唯一实现在那边
     extra_tags = list(tags or []) or ["题单导入"]
@@ -366,7 +372,9 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
 
         existing = _mk.localoj.problem_pids()
         for prefix, pid, title in dirs:
+            directory_pid = pid
             prob = parse_problem(bundle, prefix, pid, title, index_info)
+            pid, title = prob["pid"], prob["title"]
             entry = {
                 "pid": pid, "title": title, "case_count": len(prob["cases"]),
                 "difficulty": prob["difficulty"], "difficulty_label": prob["difficulty_label"],
@@ -375,12 +383,12 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
                 "code": "", "status": "", "message": "",
             }
             # ---- 基本校验
-            problems = []
+            problems = list(prob.get("errors") or [])
             if not prob["cases"]:
-                problems.append("没有找到成对的 数字.in / 数字.out 测试数据")
-            if not prob["statement"]:
+                problems.append("没有找到成对的 .in/.out（或 .in/.ans）测试数据")
+            if not prob["statement"] and prob.get("portable") is None:
                 problems.append("没有找到题面（题目.md）")
-            if not prob["std"]:
+            if not prob["std"] and prob.get("portable") is None:
                 problems.append("没有找到标程（标程.cpp）")
             if problems:
                 entry["status"] = "failed"
@@ -398,11 +406,16 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
             # ---- 题目编号：一律由系统分配（T00001，落盘到题库）；
             #      这里能指定的只有**默认英文名**（学生侧），留空则加进比赛时再填
             want = (want_codes.get(pid.upper())
+                    or want_codes.get(directory_pid.upper())
                     or want_codes.get(os.path.basename(prefix).upper()) or "")
             if not want and len(dirs) == 1:
                 want = single_code
             if dry_run:
-                if want and not valid_name(want):
+                configured_name = str((prob.get("config") or {}).get("name") or "").strip()
+                if not _mk.judge_local.valid_pid(pid):
+                    entry.update(status="failed", message="题目标识无效")
+                    report["failed"].append(pid)
+                elif (want or configured_name) and not valid_name(want or configured_name):
                     entry.update(status="failed", message=_mk.CODE_HINT)
                     report["failed"].append(pid)
                 else:
@@ -410,10 +423,20 @@ def import_problemset(source: str, *, tags: list[str] | None = None,
                     report["prepared"].append(pid)
                 report["problems"].append(entry)
                 continue
-            uploads = {n: bundle.read(n) for n in bundle.names() if n.startswith(prefix + "/")}
-            got = _mk.create_problem(pid, title, uploads, time_ms=time_ms, memory_mb=memory_mb,
-                                     statement=prob["statement"], std_source=_decode(bundle.read(prob["std"])),
-                                     overwrite=overwrite, name=want, tags=extra_tags + prob["topics"])
+            uploads = {n: bundle.read(n) for n in problem_children(bundle, prefix).values()}
+            try:
+                with store._LOCK:
+                    if pid in _mk.localoj.problem_pids() and not overwrite:
+                        entry.update(status="skipped", message="题库已有同标识的题目；覆盖请启用 overwrite。")
+                        report["skipped"].append(pid)
+                        report["problems"].append(entry)
+                        continue
+                    got = _mk.create_problem(pid, title, uploads, time_ms=time_ms, memory_mb=memory_mb,
+                                             statement=prob["statement"], std_source=_decode(bundle.read(prob["std"])) if prob["std"] else "",
+                                             overwrite=overwrite, name=want, tags=extra_tags + prob["topics"])
+            except (ValueError, OSError) as exc:
+                # 单题格式或存储错误应进入逐题报告，不能抹掉先前成功题目的报告。
+                got = {"ok": False, "error": str(exc), "pid": pid}
             ok = bool(got.get("ok"))
             entry.update(status="imported" if ok else "failed", message=got.get("error", ""),
                          number=got.get("number", ""), code=got.get("number", ""),

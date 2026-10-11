@@ -1,5 +1,7 @@
 """提交文件匹配、CSP 源码限制与文件输入输出提示。评测直接编译原始源码。"""
 
+import unicodedata
+
 SUPPORTED_EXTS = (".cpp", ".cc", ".cxx", ".c++", ".c")
 
 #: 学生可能交上来的源码后缀（挑代码文件时用）
@@ -30,26 +32,26 @@ def set_strict_case(flag: bool) -> None:
 
 def _rel(f) -> str:
     """把上传的文件名归一化：反斜杠转正斜杠、去掉开头的 `/`。"""
-    return str(f).replace("\\", "/").lstrip("/")
+    return unicodedata.normalize("NFC", str(f)).replace("\\", "/").lstrip("/")
 
 
 def _want_name(student_name) -> str:
     """把学生姓名归一化：去空白；顺手容忍调用方传成「学生01.txt」。"""
-    want = str(student_name or "").strip()
+    want = unicodedata.normalize("NFC", str(student_name or "")).strip()
     if want.lower().endswith(PERSON_FILE_EXT):
         want = want[:-len(PERSON_FILE_EXT)].strip()
     return want
 
 
 def find_person_file(files: list, student_name: str, *,
-                     strict: bool | None = None) -> str:
+                     strict: bool | None = None, kaohao: str = "") -> str:
     """在提交的文件里找**个人信息文件**（广东考区强制：文件名＝本人姓名，如 `学生56.txt`）。
 
     返回命中的相对路径；没交返回空串。**这个文件不参与判分**，只用来提示"交没交"。
 
     宽容之处：后缀大小写都算（`.txt` / `.TXT`）；姓名默认忽略大小写，
     `strict=True` 时才要求姓名完全一致（严格模式贴近真实考场）。
-    文件放在哪一层都能认（学生可能塞进子文件夹），但越靠外层越优先。
+    指定 `kaohao` 时必须直接放在该考号目录下；未指定时保留通用匹配。
 
     `student_name` 为空（不知道学生姓名）时返回空串——调用方据此跳过检查。
     """
@@ -65,6 +67,8 @@ def find_person_file(files: list, student_name: str, *,
         name = _rel(f)
         if not name:
             continue
+        if kaohao and (len(name.split("/")) != 2 or name.split("/")[0] != kaohao):
+            continue
         stem, ext = _p.splitext(_p.basename(name))
         if ext.lower() != PERSON_FILE_EXT:
             continue
@@ -79,7 +83,7 @@ def find_person_file(files: list, student_name: str, *,
 
 
 def person_file_hint(files: list, student_name: str, *,
-                     strict: bool | None = None) -> str:
+                     strict: bool | None = None, kaohao: str = "") -> str:
     """个人信息文件的检查结论：交了返回空串，没交返回一句提示（给页面显示）。
 
     `student_name` 为空时返回空串（无从判断）。这条提示落在 pick_sources() 的 missing 里，
@@ -89,12 +93,15 @@ def person_file_hint(files: list, student_name: str, *,
     want = _want_name(student_name)
     if not want:
         return ""
-    if find_person_file(files, want, strict=strict):
+    if find_person_file(files, want, strict=strict, kaohao=kaohao):
         return ""
     why = ""
+    misplaced = find_person_file(files, want, strict=strict) if kaohao else ""
+    if misplaced:
+        why = f"（找到了 {misplaced}，但必须直接放在 {kaohao}/ 下）"
     if strict:
-        near = find_person_file(files, want, strict=False)
-        if near:
+        near = find_person_file(files, want, strict=False, kaohao=kaohao)
+        if near and not why:
             why = f"（找到了 {near}，但文件名的大小写与姓名不完全一致）"
     return (f"缺个人信息文件：考号目录下应交一个「{want}.txt」，文件名＝本人姓名"
             f"（广东考区强制要求，不参与判分）{why}")
@@ -106,7 +113,11 @@ def pick_sources(files: list[str], problems: list, *,
                  ) -> tuple[dict[int, str], list[str]]:
     """从学生上传的文件里找出「每题用哪个代码文件」。
 
-    以前这里配着一套严格的目录结构校验（不合格就把整份提交退回）。现在**不再退回**：
+    `strict_layout=True` 的 CSP 入口只采用本考号目录下的 `<英文名>/<英文名>.cpp`，
+    大小写必须一致。以下匹配顺序仅用于没有启用 CSP 目录校验的通用入口。
+    不合格文件不会自动改名或搬动；未匹配的题视为没有源码。
+
+    通用入口**不退回**整份提交：
     尽量宽松地把文件对上题目，找不到就当作"这道题没交"（自然得 0 分）。
     匹配顺序（默认忽略大小写，忽略最外层那个"考号文件夹"）：
 
@@ -218,9 +229,7 @@ def pick_sources(files: list[str], problems: list, *,
         free = [p for p in srcs if p not in used]
         hit, rejects = ladder(free, no, slug, strict)
         if strict_layout:
-            allowed = {f"{slug}/{slug}.cpp"}
-            if kaohao:
-                allowed.add(f"{kaohao}/{slug}/{slug}.cpp")
+            allowed = {f"{kaohao}/{slug}/{slug}.cpp"} if kaohao else set()
             hit = next((p for p in free if p in allowed), "")
         if hit:
             picked[no] = hit
@@ -237,7 +246,7 @@ def pick_sources(files: list[str], problems: list, *,
                 notes.append(f"{p} 的大小写与题目英文名 {slug} 不一致"
                              f"（严格模式区分大小写，应为 {slug}/ 与 {slug}.cpp），已忽略")
         if not rejects and strict_layout:
-            notes.append(f"CSP 只采用 {slug}/{slug}.cpp（可置于本考号目录下），其它位置或扩展名不计分")
+            notes.append(f"CSP 只采用 {kaohao or '<考号>'}/{slug}/{slug}.cpp，考号、目录、源码名及大小写必须一致，其它位置或扩展名不计分")
         elif not rejects and strict:
             probe, _ = ladder(free, no, slug, False)      # 只为出提示，不参与判分
             if probe:
@@ -247,7 +256,7 @@ def pick_sources(files: list[str], problems: list, *,
             msg += "；" + "；".join(notes)
         missing.append(msg)
 
-    hint = person_file_hint(files, student_name, strict=strict)
+    hint = person_file_hint(files, student_name, strict=strict, kaohao=kaohao if strict_layout else "")
     if hint:
         missing.append(hint)
     return picked, missing

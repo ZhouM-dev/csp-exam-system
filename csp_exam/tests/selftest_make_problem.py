@@ -144,9 +144,9 @@ def main() -> int:
         c_out = open(os.path.join(d, "1.out"), "rb").read()
         ok(c_in == b"1\n", "1.in 里是**内容**（不是路径）", c_in)
         ok(c_out == b"2\n", "1.out 里是**内容**", c_out)
-        st = os.path.join(tmp3, "statements", "Z9001.md")
-        ok(os.path.isfile(st) and "加边后最小生成树" in io.open(st, encoding="utf-8").read(),
-           "题面同时落到 statements/<pid>.md（学生端读的就是它）")
+        from csp_exam.core import localoj
+        ok("加边后最小生成树" in localoj.problem_statement("Z9001"),
+           "题面落到 SQLite，学生端读取同一正本")
     finally:
         judgelocal.PROBLEMS_DIR, store.DATA_DIR = old_pd, old_dd
         shutil.rmtree(tmp3, ignore_errors=True)
@@ -236,11 +236,11 @@ def main() -> int:
         print("=== 12. 作废旧缓存（覆盖重建时才用）===")
         os.makedirs(os.path.join(tmp3, "statements"), exist_ok=True)
         os.makedirs(os.path.join(tmp3, "samples", "G02"), exist_ok=True)
-        with open(os.path.join(tmp3, "statements", "G02.md"), "w", encoding="utf-8") as f:
-            f.write("# 旧题面")
+        from csp_exam.core import database
+        database.save_statement(tmp3, "G02", "# 旧题面")
         gone = mp.drop_problem_cache("G02")
         ok(set(gone) == {"题面缓存", "大样例存档"}, "两处都报了", gone)
-        ok(not os.path.isfile(os.path.join(tmp3, "statements", "G02.md")), "题面缓存没了")
+        ok(not database.statement(tmp3, "G02"), "题面缓存没了")
         ok(not os.path.isdir(os.path.join(tmp3, "samples", "G02")), "大样例存档没了")
         ok(mp.drop_problem_cache("Missing") == [], "没有残留时不报错、返回空")
     finally:

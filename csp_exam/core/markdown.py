@@ -20,11 +20,19 @@ def md_to_html(text: str) -> str:
     in_math: list[str] = []
 
     def inline(t: str) -> str:
-        t = html.escape(t)
-        t = _re.sub(r"`([^`]+)`", r"<code>\1</code>", t)
-        t = _re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", t)
-        t = _re.sub(r"(?<![\w*])\*([^*]+)\*(?![\w*])", r"<i>\1</i>", t)
-        return t
+        # Code and TeX are literal islands: Markdown emphasis must not consume
+        # multiplication signs or backticks inside a formula/code fragment.
+        parts = _re.split(r"(`[^`]+`|\$\$[^$]+\$\$|\$(?!\$)[^$]+\$(?!\$))", t)
+        rendered = []
+        for i, part in enumerate(parts):
+            escaped = html.escape(part)
+            if i % 2:
+                rendered.append("<code>" + html.escape(part[1:-1]) + "</code>"
+                                if part.startswith("`") else escaped)
+            else:
+                escaped = _re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", escaped)
+                rendered.append(_re.sub(r"(?<![\w*])\*([^*]+)\*(?![\w*])", r"<i>\1</i>", escaped))
+        return "".join(rendered)
 
     def close_list():
         nonlocal in_list
@@ -41,6 +49,14 @@ def md_to_html(text: str) -> str:
     for raw in lines:
         line = raw.rstrip()
         stripped = line.strip()
+        # Fenced examples remain literal even when they contain $$ or TeX.
+        if in_code:
+            if stripped.startswith("```"):
+                out.append("</pre>")
+                in_code = False
+            else:
+                out.append(html.escape(raw))
+            continue
         # 显示公式块 `$$ … $$`：**整块必须待在同一个元素里**。
         # KaTeX 是在页面上扫这对定界符的，逐行成段落会把它拆成三段
         # （`$$` / 公式 / `$$`），定界符配不上对，页面上就把 `$$` 和公式原样显示出来
@@ -54,7 +70,7 @@ def md_to_html(text: str) -> str:
             continue
         if stripped.startswith("$$"):
             close_list(); close_table()
-            if stripped.count("$$") >= 2:          # 一行写完：`$$x$$`
+            if stripped.count("$$") >= 2:
                 out.append('<div class="math-block">' + html.escape(stripped) + "</div>")
             else:
                 in_math = [stripped]
@@ -67,9 +83,6 @@ def md_to_html(text: str) -> str:
             else:
                 out.append('<pre class="stmt-code">')
                 in_code = True
-            continue
-        if in_code:
-            out.append(html.escape(raw))
             continue
         if not stripped:
             close_list(); close_table()

@@ -4,7 +4,7 @@ import html
 import math
 import urllib.parse
 
-from ..core import gojudge, grading, judge_profile, problems, store
+from ..core import hydro_client, task_queue, gojudge, grading, judge_profile, problems, store
 from .ui import page
 
 
@@ -28,13 +28,15 @@ def route(handler, q, *, post=False):
             elif form.get("action") == "limits":
                 pid = form.get("pid", "")
                 t, m = int(form.get("time_ms", "0")), int(form.get("memory_mb", "0"))
-                if t <= 0 or m <= 0 or t > 60000 or m > 2048:
-                    raise ValueError("请填题面规定的时限和内存：当前主机支持 1～60000 ms / 1～2048 MiB")
+                if t <= 0 or m <= 0 or t > 60000 or m > 1024:
+                    raise ValueError("请填题面规定的时限和内存：当前主机支持 1～60000 ms / 1～1024 MiB")
                 with store._LOCK:
                     info = problems.load_problem_info()
                     if pid not in info:
                         raise ValueError("题目不存在")
-                    info[pid].update(time_ms=t, memory_mb=m, limit_source=form.get("note", "")[:2000])
+                    problems.remember_problem(pid, time_ms=t, memory_mb=m)
+                    info = problems.load_problem_info()
+                    info[pid]["limit_source"] = form.get("note", "")[:2000]
                     problems.save_problem_info(info)
                 message = "题目限额已保存，请安排受影响比赛重测。"
             else:
@@ -47,18 +49,21 @@ def route(handler, q, *, post=False):
         if q.get("format") == "json":
             return handler._json({"ok": not error, "message": message, "queued": queued}, 400 if error else 200)
     try:
+        engine = hydro_client.health()
         environment = gojudge.ensure_ready()
-        environment_text = environment["compiler"] + " · " + environment["sandbox"] + " · " + environment["cgroup"]
+        environment_text = engine["engine"] + " " + engine["version"] + " · " + environment["compiler"] + " · " + environment["sandbox"] + " · " + environment["cgroup"]
     except gojudge.GoJudgeError as e:
         environment_text = "评测已停止：" + str(e)
+    queued_count = task_queue.pending()
     profile = judge_profile.load()
     scale = profile["time_scale"]
     body = handler._admin_nav(key) + '<h1>评测设置</h1>'
     if message:
         body += handler._flash("info", message)
     body += (f'<div class="card"><p>{html.escape(environment_text)}</p>'
-             '<p>NOI Linux 2.0 镜像工具链；C++ 参数：<code>-O2 -std=c++14 -static</code>。'
+             '<p>HydroJudge 4.0.6 + go-judge；Ubuntu 20.04 / G++ 9.3.0 工具链；C++ 参数：<code>-O2 -std=c++14 -static</code>。'
              'CSP 使用文件输入输出。服务器内核和 CPU 与官方评测机不同。</p>'
+             f'<p>队列中有 {queued_count} 份提交 · 并发 1</p>'
              f'<p>时间倍率 <b>{scale:g}</b> · {"已有基准对比记录" if profile["calibrated"] else "未标定"}</p>'
              f'<p>有效时限 = 官方时限 × 倍率。官方 1000 ms 当前为 {math.ceil(1000 * scale)} ms。'
              '使用 CPU 时间；内存和栈限额按题目设置，均不乘倍率。每份结果记录当时的倍率。</p>'
@@ -87,7 +92,7 @@ def route(handler, q, *, post=False):
                  '<input type="hidden" name="action" value="limits">'
                  f'<label>题目 <select name="pid">{choices}</select></label>'
                  '<label>时限（ms）<input name="time_ms" type="number" min="1" max="60000" required></label>'
-                 '<label>内存（MiB）<input name="memory_mb" type="number" min="1" max="2048" required></label>'
+                 '<label>内存（MiB）<input name="memory_mb" type="number" min="1" max="1024" required></label>'
                  '<label>依据 <input name="note" placeholder="原题面或出题人的配置" required></label>'
                  '<button type="submit">补齐限额</button></form>')
     return handler._send(page("评测设置", body))

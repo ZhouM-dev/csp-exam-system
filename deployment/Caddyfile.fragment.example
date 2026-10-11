@@ -1,0 +1,15 @@
+# Append this site block to the existing Caddy configuration after validation.
+# Replace the domain. Preserve LiteOJ's existing block.
+csp.example.com {
+    encode zstd gzip
+    request_body {
+        max_size 65MiB
+    }
+    handle_path /source/* {
+        root * /opt/csp-exam/public-source
+        file_server
+    }
+    handle {
+        reverse_proxy 127.0.0.1:8081
+    }
+}

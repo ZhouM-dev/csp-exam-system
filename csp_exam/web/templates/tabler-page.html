@@ -1,0 +1,26 @@
+<!doctype html>
+<!-- Layout adapted from https://docs.tabler.io/ui/layout/page-layouts (MIT). -->
+<html lang="zh-CN" data-bs-theme="light"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<link rel="stylesheet" href="${assets}tabler.min.css">
+<link rel="stylesheet" href="/static/exam-components.css?v=r5">
+${extra_head}
+<script defer src="${assets}tabler.min.js"></script>
+</head><body>
+<div class="page">
+${sidebar}
+<div class="page-wrapper">
+<header class="navbar navbar-expand-md d-print-none"><div class="container-xl">
+<a class="navbar-brand navbar-brand-autodark" href="/">CSP 模拟考试</a>
+<div class="navbar-nav flex-row"><span class="nav-link text-secondary">CSP-J / CSP-S</span></div>
+</div></header>
+${heading}
+<main class="page-body"><div class="container-xl">${body}</div></main>
+<footer class="footer footer-transparent d-print-none"><div class="container-xl">
+<div class="d-flex flex-wrap justify-content-between gap-2 text-secondary small">
+<span>CSP 训练站</span><span><a href="/source/">开源许可与源码</a> · 界面采用 Tabler</span>
+</div></div></footer>
+</div></div>
+${extra_script}
+</body></html>

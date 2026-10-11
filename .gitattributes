@@ -1,0 +1,6 @@
+# Vendored assets have upstream SHA-256 manifests; retain their exact bytes.
+csp_exam/web/static/vendor/** -text
+csp_exam/web/static/katex/** -text
+deployment/Dockerfile* text eol=lf
+deployment/**/Dockerfile* text eol=lf
+deployment/**/LICENSE text eol=lf

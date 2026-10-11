@@ -1,0 +1,10 @@
+{
+  "name": "csp-hydro-adapter",
+  "version": "1.0.0",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "dependencies": {
+    "@hydrooj/hydrojudge": "4.0.6",
+    "@hydrooj/register": "1.0.4"
+  }
+}

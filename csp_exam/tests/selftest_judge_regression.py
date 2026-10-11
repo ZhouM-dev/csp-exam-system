@@ -8,11 +8,12 @@ import tempfile
 import threading
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from csp_exam.core import grading, gojudge, judge_profile, judgelocal, scoreboard, store, submissions, wrapper
-from csp_exam.tools.calibrate_judge import compare as compare_benchmark, FLAGS, SOURCE_HASH, WORKLOADS
+from csp_exam.core import hydro_client, grading, gojudge, judge_profile, judgelocal, scoreboard, store, submissions, wrapper
+from csp_exam.tools.calibrate_judge import benchmark, compare as compare_benchmark, FLAGS, SOURCE_HASH, WORKLOADS
 from csp_exam.web.multipart import _read_zip
 from csp_exam.web import student_pages
 from csp_exam.web.server import Handler
@@ -46,7 +47,12 @@ class Regression(unittest.TestCase):
                 submissions.clean_files({name: b"x"})
         base = Path(store.upload_dir(self.cid, self.kh))
         base.mkdir(parents=True, exist_ok=True)
-        (base / "escape").symlink_to(Path(self.temp.name))
+        try:
+            (base / "escape").symlink_to(Path(self.temp.name))
+        except OSError as error:
+            if os.name == 'nt' and getattr(error, 'winerror', None) == 1314:
+                self.skipTest('Windows 未授予符号链接权限；Linux 部署验收须执行此检查')
+            raise
         with self.assertRaises(ValueError):
             submissions.confined_file(str(base), "escape/outside")
 
@@ -83,12 +89,6 @@ class Regression(unittest.TestCase):
         picked, _ = wrapper.pick_sources([f"{self.kh}/candy/candy.cpp"], [self.problem], strict=True,
                                          strict_layout=True, kaohao=self.kh)
         self.assertEqual(picked[1], f"{self.kh}/candy/candy.cpp")
-
-    def test_text_comparison_is_binary_and_space_specific(self):
-        self.assertTrue(judgelocal.compare(b"x  \r\n\r\n", b"x\n"))
-        for got in [b" x\n", b"x\t\n", "x\u00a0\n".encode(), b"x\xff\n"]:
-            self.assertFalse(judgelocal.compare(got, b"x\n"))
-        self.assertFalse(judgelocal.compare(b"\xff", b"\xfe"))
 
     def test_missing_answer_refuses_import(self):
         with self.assertRaises(OSError):
@@ -164,6 +164,7 @@ class Regression(unittest.TestCase):
         store.put_result(self.cid, "GD-S23456", {"submitted_at": "x", "problems": {"T1": {"score": 100}}})
         state = scoreboard.snapshot(self.cid, private=True)
         self.assertEqual([r["rank"] for r in state["rows"]], [1, 1])
+        store.update_contest(self.cid, start_at=1, end_at=2)
         store.save_exam(self.cid, {**self.exam, "released": True})
         self.assertNotIn("kaohao", scoreboard.snapshot(self.cid)["rows"][0])
 
@@ -177,30 +178,57 @@ class Regression(unittest.TestCase):
             self.assertEqual(kw["time_ms"], 1500)
             judge_profile.save(2)
             return {"status": 1, "score": 100, "time": 900}
-        with patch.object(gojudge, "ensure_ready", return_value={}), patch.object(judgelocal, "_judge_inner", side_effect=inner):
+        with patch.object(gojudge, "ensure_ready", return_value={}), patch.object(hydro_client, "judge", side_effect=inner):
             r = judgelocal.judge_source("P", b"", ".cpp", code="candy", full=100)
         self.assertEqual(r["time_scale"], 1.5)
         self.assertEqual(r["official_time_ms"], 1000)
         self.assertEqual(r["effective_time_ms"], 1500)
         self.assertEqual(r["reference_time"], 600)
 
-    def test_case_limits_missing_file_and_cleanup(self):
-        r = {"status": "Accepted", "time": 999000000, "memory": 1024, "fileIds": {"stdout": "out"}}
-        with patch.object(gojudge, "prepare", return_value="input"), patch.object(gojudge, "run", return_value=r) as run, \
-                patch.object(gojudge, "fetch", return_value=b"ok"), patch.object(gojudge, "drop") as drop:
-            _, status, _, _, _ = judgelocal._run_case("binary", {"in": b"\xff"}, code="candy", time_ms=500,
-                                                    memory_mb=512, io_mode="file")
-            self.assertEqual(status, 3)
-            self.assertEqual(run.call_args.kwargs["stack_mb"], 512)
-            self.assertEqual(run.call_args.kwargs["files"][0], {"content": ""})
-            self.assertCountEqual([x.args[0] for x in drop.call_args_list], ["input", "out"])
+    def test_judging_delegates_without_fallback(self):
+        judgelocal.store_problem('P', [{'in': b'1', 'out': b'2', 'name': '1'}])
+        raw = b'// GBK: \xff\xfe\nint main(){}'
+        with patch.object(gojudge, 'ensure_ready', return_value={}), \
+             patch.object(hydro_client, 'judge', side_effect=gojudge.GoJudgeError('unavailable')) as engine, \
+             patch.object(gojudge, 'run') as legacy:
+            row = judgelocal.judge_source('P', raw, '.cpp', code='candy', full=100)
+        self.assertEqual(row['status'], 8)
+        self.assertEqual(engine.call_args.args[1], raw)
+        legacy.assert_not_called()
 
     def test_benchmark_ratio_direction(self):
         def data(ms):
-            return {"source_sha256": SOURCE_HASH, "flags": FLAGS, "compiler": "9.3.0",
-                    "benchmarks": {n: {"checksum": "same", "median_ms": ms, "spread": .01} for n in WORKLOADS}}
+            return {"schema":2,"source_sha256": SOURCE_HASH, "flags": FLAGS, "compiler": "9.3.0",
+                    "benchmarks": {n: {"checksum": "same", "median_ms": ms, "spread": 0,'samples_ms':[ms]*3} for n in WORKLOADS}}
         self.assertEqual(compare_benchmark(data(1500), data(1000))["time_scale"], 1.5)
         self.assertEqual(compare_benchmark(data(500), data(1000))["time_scale"], .5)
+        reference=data(1000);local=data(1500)
+        local['benchmarks'][WORKLOADS[0]]['samples_ms']=[float('nan')]*3
+        with self.assertRaises(ValueError):compare_benchmark(local,reference)
+        local=data(1500);local['benchmarks'][WORKLOADS[0]]['median_ms']=1
+        with self.assertRaises(ValueError):compare_benchmark(local,reference)
+        local=data(1500);local['source_sha256']='other'
+        with self.assertRaises(ValueError):compare_benchmark(local,reference)
+        local=data(1500);local['benchmarks'][WORKLOADS[0]].update(samples_ms=[1200,1500,1800],spread=.4)
+        self.assertTrue(compare_benchmark(local,reference)['warnings'])
+
+    def test_native_benchmark_isolates_generated_files(self):
+        ticks=iter(range(100))
+        usage=SimpleNamespace(RUSAGE_CHILDREN=1,getrusage=lambda _:SimpleNamespace(ru_utime=next(ticks),ru_stime=0))
+        roots=[]
+        def execute(args,**kwargs):
+            if args[0]=='g++':return 'g++ (Ubuntu 9.3.0-10ubuntu2) 9.3.0\n'
+            root=Path(kwargs['cwd'])
+            self.assertEqual(Path(args[0]).parent,root)
+            self.assertEqual(hashlib.sha256((root/'benchmark.cpp').read_bytes()).hexdigest(),SOURCE_HASH)
+            (root/'benchmark.in').write_bytes(b'trusted benchmark only')
+            roots.append(root)
+            return b'fixed checksum\n'
+        import hashlib
+        with patch.dict(sys.modules,{'resource':usage}),patch('subprocess.run'),patch('subprocess.check_output',side_effect=execute):
+            result=benchmark(3,native=True,label='isolated test')
+        self.assertEqual(set(result['benchmarks']),set(WORKLOADS))
+        self.assertTrue(roots and all(not root.exists() for root in roots))
 
     def test_rejudge_backups_and_withdraws_release(self):
         store._save(store._path("problem_info.json"), {"items": {"P": {"time_ms": 1000, "memory_mb": 256}}})
@@ -209,6 +237,7 @@ class Regression(unittest.TestCase):
         entry = store.load_results(self.cid)[self.kh]
         entry.update(submission_id=sid, picked={"1": snap + "/candy/candy.cpp"})
         store.put_result(self.cid, self.kh, entry)
+        store.update_contest(self.cid, start_at=1, end_at=2)
         store.save_exam(self.cid, {**self.exam, "released": True})
         with patch.object(grading, "enqueue_submission") as enqueue, \
                 patch.object(grading, "reserve_submission", return_value=True), patch.object(grading, "release_submission"):

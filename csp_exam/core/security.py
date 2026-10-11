@@ -11,6 +11,11 @@ from . import store
 ADMIN_COOKIE = "csp_admin"
 
 
+def matches_secret(supplied: str, expected: str) -> bool:
+    """比较用户输入；非 ASCII 的错误密钥也应正常拒绝，而不是抛 TypeError。"""
+    return isinstance(supplied, str) and hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+
+
 def _sign(text: str) -> str:
     key = store.admin_key().encode()
     return hmac.new(key, text.encode(), hashlib.sha256).hexdigest()[:24]
@@ -34,7 +39,7 @@ def parse_cookie(raw: str) -> tuple[str, str] | None:
     payload = urllib.parse.unquote(payload)
     if ":" not in payload:
         return None
-    if hmac.compare_digest(sig, _sign(payload)):
+    if matches_secret(sig, _sign(payload)):
         cid, _, kaohao = payload.partition(":")
         return (cid, kaohao) if cid and kaohao else None
     return None
@@ -45,4 +50,4 @@ def make_admin_cookie() -> str:
 
 
 def parse_admin_cookie(raw: str) -> bool:
-    return bool(raw) and hmac.compare_digest(raw, make_admin_cookie())
+    return bool(raw) and matches_secret(raw, make_admin_cookie())

@@ -9,6 +9,7 @@ import uuid
 
 from ..config import MAX_SOURCE_BYTES, MAX_STUDENT_ARCHIVE, MAX_UPLOAD, MAX_UPLOAD_FILES
 from . import store
+from .archive import safe_name
 
 
 def clean_files(files: dict[str, bytes]) -> dict[str, bytes]:
@@ -18,7 +19,7 @@ def clean_files(files: dict[str, bytes]) -> dict[str, bytes]:
         raise ValueError("全部文件解压后的总大小超过 32 MiB。")
     result = {}
     for raw, data in files.items():
-        name = str(raw).replace("\\", "/")
+        name = safe_name(str(raw))
         parts = name.split("/")
         if (not name or "\0" in name or name.startswith("/")
                 or any(p in ("", ".", "..") or ":" in p for p in parts)):

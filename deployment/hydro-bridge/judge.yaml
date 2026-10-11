@@ -1,0 +1,15 @@
+sandbox_host: http://127.0.0.1:5060
+cache_dir: /var/lib/csp-exam/hydro-work
+tmp_dir: /var/lib/csp-exam/hydro-work
+parallelism: 1
+concurrency: 1
+singleTaskParallelism: 1
+testcases_max: 1024
+total_time_limit: 3600
+memoryMax: 1024m
+strict_memory: true
+stdio_size: 16m
+processLimit: 64
+rerun: 0
+rate: 1
+detail: full

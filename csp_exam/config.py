@@ -17,8 +17,8 @@ ROOT_DIR = os.path.dirname(PKG_DIR)
 #: 兼容旧写法：以前模块里到处用 HERE 表示"部署根目录"
 HERE = ROOT_DIR
 
-DATA_DIR = os.path.join(ROOT_DIR, "data")
-LOG_DIR = os.path.join(ROOT_DIR, "logs")
+DATA_DIR = os.path.abspath(os.environ.get("CSP_EXAM_DATA_DIR", os.path.join(ROOT_DIR, "data")))
+LOG_DIR = os.path.abspath(os.environ.get("CSP_EXAM_LOG_DIR", os.path.join(ROOT_DIR, "logs")))
 SAMPLES_DIR = os.path.join(DATA_DIR, "samples")          # 大样例（学生可下载）
 STATEMENTS_DIR = os.path.join(DATA_DIR, "statements")    # 题面正本
 
@@ -35,19 +35,21 @@ NOTICE_DOC = os.path.join(PKG_DIR, "notice_guangdong.md")
 
 #: 服务端口
 PORT = int(os.environ.get("CSP_EXAM_PORT", "8080"))
+BIND = os.environ.get("CSP_EXAM_BIND", "127.0.0.1")
+COOKIE_SECURE = os.environ.get("CSP_EXAM_COOKIE_SECURE", "0") == "1"
+PUBLIC_ORIGIN = os.environ.get("CSP_EXAM_PUBLIC_ORIGIN", "").rstrip("/")
 #: 学生会话 cookie 名（管理端 cookie 名在 core/security.py）
 STUDENT_COOKIE = "csp"
 
 #: 上传上限
 MAX_UPLOAD = 32 * 1024 * 1024         # 学生提交：32MB
-MAX_PS_UPLOAD = 512 * 1024 * 1024     # 题单 zip：512MB
+MAX_PS_UPLOAD = int(os.environ.get('CSP_MAX_PS_UPLOAD_MB', '64')) * 1024 * 1024
 MAX_UPLOAD_FILES = 1024
 MAX_SOURCE_BYTES = 100 * 1024        # CSP 官方源文件上限
 MAX_STUDENT_ARCHIVE = 256 * 1024 * 1024
-MAX_JUDGE_QUEUE = 64
 
 #: 判分并发上限（每个判分任务会去评测站提交并等结果，别开太多）
-JUDGE_SLOTS = threading.Semaphore(1) # 2 vCPU / 3.4 GiB 评测机：避免多个 2 GiB 任务同时运行
+JUDGE_SLOTS = threading.Semaphore(1)
 
 #: 题单导入任务的状态（jid -> 进度/报告），由 web/admin_pages 使用
 PS_JOBS: dict = {}

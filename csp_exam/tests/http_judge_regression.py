@@ -10,6 +10,7 @@ import time
 import urllib.parse
 from unittest.mock import patch
 
+from csp_exam.tests.live_hydro_fixture import live_hydro_fixture
 from csp_exam.core import judgelocal, problems, security, store
 from csp_exam.web.server import Handler
 
@@ -19,12 +20,12 @@ def main():
     def check(label, condition):
         checks.append({"name": label, "ok": bool(condition)})
         if not condition: raise AssertionError(label)
-    with tempfile.TemporaryDirectory(prefix="csp-http-regression-") as tmp, \
+    with live_hydro_fixture(prefix="csp-http-regression-") as tmp, \
             patch.object(store, "DATA_DIR", tmp), \
             patch.object(judgelocal, "PROBLEMS_DIR", str(Path(tmp) / "problems")):
         cid, kh = "http_test", "GD-S12345"
         prob = {"no": 1, "pid": "P", "name": "candy", "full": 100}
-        store._save(store._path("contests.json"), [{"id": cid, "title": "HTTP 验收", "rule": "CSP", "open": True}])
+        store._save(store._path("contests.json"), [{"id": cid, "title": "HTTP 验收", "rule": "CSP", "open": True, "start_at": int(time.time())-600, "end_at": int(time.time())+3600}])
         store.save_exam(cid, {"problems": [prob], "released": False})
         store._save(store._path("contests", cid, "roster.json"), {kh: {"name": "测试学生"}})
         problems.save_problem_info({"P": {"time_ms": 1000, "memory_mb": 512}})
@@ -76,14 +77,15 @@ def main():
             check("HTTP 路径穿越拒绝", status == 400)
             status, _ = upload([("candy/candy.cpp", src), ("candy/candy.cpp", src)])
             check("重复表单文件拒绝", status == 400)
-            store.update_contest(cid, deadline=1)
+            store.update_contest(cid, end_at=int(time.time())-1)
             status, _ = upload([(kh + "/candy/candy.cpp", src)])
             check("截止后交卷拒绝", status == 403)
-            store.update_contest(cid, deadline=0)
+            store.update_contest(cid, end_at=int(time.time())+3600)
             status, _ = upload([("candy.cpp", src)])
             check("错误目录交卷保留回执", status == 200)
             result = wait()
             check("最后交卷缺题清零", result["total"] == 0)
+            store.update_contest(cid, end_at=int(time.time())-1)
             status, _ = request("POST", "/admin/release?c=" + cid, b"released=1", cookie=admin)
             check("教师公布成绩", status == 302)
             _, data = request("GET", "/api/scoreboard?c=" + cid)
@@ -97,7 +99,7 @@ def main():
             result = wait()
             check("重测创建独立快照且不增加交卷次数", result["submission_id"] != previous_sid
                   and result["problems"]["T1"]["tries"] == previous_tries and bool(result.get("judge_revision")))
-            store.update_contest(cid, rule="IOI")
+            store.update_contest(cid, rule="IOI", end_at=int(time.time())+3600)
             src_std = b'#include <cstdio>\nint main(){int a,b;scanf("%d %d",&a,&b);printf("%d\\n",a+b);}'
             status, _ = upload([("candy/candy.cpp", src_std)])
             check("IOI 标准输入输出交卷", status == 200)
@@ -118,8 +120,10 @@ def main():
             result = store.load_results(cid)[kh]
             check("IOI 未满分且缺历史明确待补资料", result["submission_state"] == "error" and bool(result.get("rejudge_error"))
                   and not result.get("rejudge_proof"))
+            store.update_contest(cid, end_at=int(time.time())-1)
             status, _ = request("POST", "/admin/release?c=" + cid, b"released=1", cookie=admin)
             check("IOI 待补资料无法公布", status == 302 and not store.load_exam(cid).get("released"))
+            store.update_contest(cid, end_at=int(time.time())+3600)
             src_six = b'#include <cstdio>\nint main(){int a,b;scanf("%d %d",&a,&b);printf("%d\\n",a+b+1);}'
             status, _ = upload([("candy/candy.cpp", src_six)])
             deadline = time.monotonic() + 40

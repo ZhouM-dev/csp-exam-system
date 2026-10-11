@@ -1,0 +1,15 @@
+<!doctype html>
+<!-- Authentication layout uses Tabler's page-center/container-tight/card components. -->
+<html lang="zh-CN" data-bs-theme="light"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title>
+<link rel="stylesheet" href="${assets}tabler.min.css">
+<link rel="stylesheet" href="/static/exam-components.css">
+${extra_head}<script defer src="${assets}tabler.min.js"></script>
+</head><body class="d-flex flex-column">
+<div class="page page-center"><main class="container-tight py-4">
+<div class="text-center mb-4"><a href="/" class="navbar-brand navbar-brand-autodark">CSP 模拟考试</a></div>
+<h1 class="h2 text-center mb-4">${title}</h1>
+${body}
+<div class="text-center text-secondary mt-4 small">CSP 训练站 · 界面采用 Tabler</div>
+</main></div>${extra_script}</body></html>

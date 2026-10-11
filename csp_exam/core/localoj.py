@@ -1,14 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""本地题目库：换掉 Hydro 之后，题目数据、题面、题库列表都归这里。
+"""本地题库适配：SQLite 保存题面与业务记录，文件目录保存测试数据。
 
-为什么单独一个模块：判题换成 go-judge 之后，"题目"这件事就全在本地了 ——
-`data/problems/<pid>/testdata/*.in|*.out` 是数据，`data/statements/<pid>.md` 是题面，
-登记表还是 `problem_codes.json`（题目编号/默认英文名）与 `problem_info.json`（时限/内存/删没删）。
-
-这个模块的**函数签名刻意和 `hydro_client` 里那几个对齐**（`list_problems` /
-`problem_statement` / `read_problem_case`），这样页面那边只要换个模块名，
-不用改调用姿势 —— 迁移期间少动一处就少一处风险。
+评测仍通过成熟的 HydroJudge 与 go-judge 服务执行。
 """
 
 from __future__ import annotations
@@ -41,7 +35,7 @@ def list_problems() -> list:
 
 
 def problem_statement(pid: str, cache_dir: str = "", ttl: int = 0) -> str:
-    """题面（Markdown 原文）—— **本地文件就是正本**：`data/statements/<pid>.md`。
+    """题面（Markdown 原文）—— SQLite statements 表是正本。
 
     后两个参数是为了和 `hydro_client.problem_statement(pid, cache_dir, ttl)` 的
     调用姿势兼容而留的，本地实现用不上（没有"从别处取回来缓存"这回事了）。
@@ -49,18 +43,12 @@ def problem_statement(pid: str, cache_dir: str = "", ttl: int = 0) -> str:
     pid = str(pid or "").strip()
     if not judgelocal.valid_pid(pid):
         return ""
-    path = os.path.join(store.DATA_DIR, "statements", f"{pid}.md")
-    if not os.path.isfile(path):
-        return ""
-    try:
-        with open(path, encoding="utf-8") as f:
-            return f.read()
-    except OSError:
-        return ""
+    from . import database
+    return database.statement(store.DATA_DIR, pid)
 
 
 def set_problem_statement(pid: str, text: str) -> dict:
-    """改题面：直接写本地文件（不用再"两处都写"了 —— 只有这一处）。
+    """修改 SQLite 中的题面与版本，比赛页读取同一正本。
 
     返回 `{"ok", "field", "error"}`，与旧的 `hydro_client.set_problem_statement` 同形，
     调用点（`_admin_statement_post`）不用改逻辑。
@@ -70,14 +58,12 @@ def set_problem_statement(pid: str, text: str) -> dict:
         return {"ok": False, "error": "没有指定题目标识"}
     if pid not in problem_pids():
         return {"ok": False, "error": f"本机题目库里没有 {pid}"}
-    path = os.path.join(store.DATA_DIR, "statements", f"{pid}.md")
     try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8", newline="\n") as f:
-            f.write((text or "").replace("\r\n", "\n").replace("\r", "\n"))
+        from . import database
+        database.save_statement(store.DATA_DIR, pid, text or "")
     except OSError as e:
         return {"ok": False, "error": f"写题面失败：{e}"}
-    return {"ok": True, "field": "file", "modified": 1}
+    return {"ok": True, "field": "sqlite", "modified": 1}
 
 
 def read_problem_case(pid: str, case_id) -> tuple:
@@ -124,6 +110,8 @@ def health() -> dict:
     if g.get("ok"):
         try:
             environment = judgelocal.gojudge.ensure_ready()
+            from . import hydro_client
+            hydro_client.health()
         except judgelocal.gojudge.GoJudgeError as e:
             g.update(ok=False, error=str(e))
     pids = sorted(problem_pids())

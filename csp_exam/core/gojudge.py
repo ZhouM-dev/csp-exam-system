@@ -1,24 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""go-judge 客户端（判题沙箱，`https://github.com/criyle/go-judge`）。
+"""go-judge 的环境核验与运维诊断客户端。
 
-它是**沙箱执行器**，不是 OJ：只会「编译这段代码」「按这些限额跑这个程序」，
-题目数据、判分口径、成绩都归考试服务自己管（见 `judgelocal.py`）。
-
-服务端：`systemd` 常驻 `127.0.0.1:5050`（见仓库文档与 `deploy.sh`），
-**只监听本机** —— 它本身没有鉴权，安全边界就是"不对外"。
-
-接口（v1.13 实测，别照抄别的版本的字段名）：
-  * `GET  /version`        健康检查（`buildVersion`）
-  * `GET  /config`         支持哪些特性（`cgroupType` 必须是 2，见 `probe()`）
-  * `POST /file`           把内容存进沙箱的文件仓库，返回 fileId（**二进制安全**）
-  * `GET  /file/<id>`      取回内容；`DELETE /file/<id>` 释放
-  * `POST /run`            跑命令；响应**就是结果数组本身**（不是 {"results": …}）
-
-限额字段名（v1.13）：`cpuLimit`（CPU 时间，纳秒）、`clockLimit`（墙钟，纳秒）、
-`memoryLimit`（字节）、`stackLimit`、`procLimit`。**这些名字必须对** ——
-写错的话服务端会当未知字段忽略，程序就"没有限额"地跑飞（所以下面有
-`selftest()`：真跑一个死循环确认 TLE 拦得住）。
+正式编译、执行、答案检查由 HydroJudge 使用 go-judge 完成。
+此模块的 run/prepare 用于工具链、seccomp/cgroup 核验与性能基准，不负责判分。
+当前沙箱 v1.12.0 只绑定本机 5060；本客户端未配置 go-judge 自带的可选鉴权。
 """
 
 from __future__ import annotations
@@ -33,7 +19,11 @@ import threading
 import time
 
 #: 沙箱地址；只允许本机，换机时用环境变量覆盖
-BASE = os.environ.get("CSP_GOJUDGE_URL", "http://127.0.0.1:5050").rstrip("/")
+BASE = os.environ.get("CSP_GOJUDGE_URL", "http://127.0.0.1:5060").rstrip("/")
+_url = urllib.parse.urlparse(BASE)
+if (_url.scheme not in ("http", "https") or _url.hostname not in ("127.0.0.1", "localhost", "::1")
+        or _url.username or _url.password or _url.path or _url.query or _url.fragment):
+    raise ValueError("当前 go-judge 客户端未配置鉴权，只能使用本机回环地址；远程评测请通过专用安全隧道接入。")
 #: 单次 HTTP 超时（跑题本身另有 clockLimit 管着，这里只是别把线程吊死）
 HTTP_TIMEOUT = int(os.environ.get("CSP_GOJUDGE_TIMEOUT", "120"))
 
@@ -108,7 +98,7 @@ def probe() -> dict:
 
 
 def ensure_ready() -> dict:
-    """每分钟核验实际沙箱编译器、cgroup 与 seccomp，错误时停止评测。"""
+    """核验工具链、cgroup、执行身份与 NoNewPrivs；记录可选 seccomp 的真实状态。"""
     global _VERIFIED_AT, _VERIFIED_INFO
     with _VERIFY_LOCK:
         if time.monotonic() - _VERIFIED_AT < 60 and _VERIFIED_INFO:
@@ -121,13 +111,26 @@ def ensure_ready() -> dict:
         first = text.splitlines()[0] if text else ""
         if r.get("status") != "Accepted" or not first.endswith(" 9.3.0"):
             raise GoJudgeError("评测环境不符合 NOI Linux 2.0：要求 G++ 9.3.0，实际 " + first)
-        r = run(["/bin/sh", "-c", "grep -E 'Seccomp:|NoNewPrivs:' /proc/self/status"],
+        r = run(["/usr/bin/grep", "-E", "Seccomp:|NoNewPrivs:|Uid:|Gid:", "/proc/self/status"],
                 cpu_ms=1000, memory_mb=64)
         text = (r.get("files") or {}).get("stdout", b"").decode("utf-8", "replace")
-        if r.get("status") != "Accepted" or "Seccomp:\t2" not in text or "NoNewPrivs:\t1" not in text:
-            raise GoJudgeError("沙箱 seccomp 或 NoNewPrivs 未生效，已停止评测")
+        if (r.get("status") != "Accepted" or "NoNewPrivs:\t1" not in text
+                or "Uid:\t1536\t1536\t1536\t1536" not in text
+                or "Gid:\t1536\t1536\t1536\t1536" not in text):
+            raise GoJudgeError("沙箱非特权身份或 NoNewPrivs 未生效，已停止评测")
+        r = run(['/bin/cat','/proc/self/uid_map','/proc/self/gid_map'], cpu_ms=1000, memory_mb=64)
+        maps = (r.get('files') or {}).get('stdout',b'').decode().splitlines()
+        user_maps=[line.split() for line in maps if line.split() and line.split()[0]=='1536']
+        if (r.get('status') != 'Accepted' or len(user_maps)!=2
+                or any(len(m)!=3 or int(m[1])<20001 or m[2]!='1' for m in user_maps)):
+            raise GoJudgeError('沙箱没有映射到独立宿主 UID/GID 20000 段，已停止评测')
+        seccomp = "Seccomp:\t2" in text
+        if os.environ.get('CSP_REQUIRE_SECCOMP') == '1' and not seccomp:
+            raise GoJudgeError("当前部署要求 seccomp，但实际未启用，已停止评测")
         _VERIFIED_INFO = {"compiler": first, "sandbox": p["version"], "cgroup": p["cgroup"],
-                          "flags": ["-O2", "-std=c++14", "-static"]}
+                          "flags": ["-O2", "-std=c++14", "-static"],
+                          "sandbox_uid":1536,"host_uid_range":"20001+",
+                          "no_new_privs":True,"seccomp":seccomp}
         _VERIFIED_AT = time.monotonic()
         return dict(_VERIFIED_INFO)
 
@@ -233,7 +236,7 @@ def selftest() -> dict:
         # 后面每个测试点直接引用它的 fileId —— 这就是判题引擎省掉重复编译的那一招
         r = run(["/usr/bin/g++", "-O2", "-std=c++14", "main.cpp", "-o", "main"],
                 copy_in={"main.cpp": {"content": src}},
-                cpu_ms=20000, clock_ms=60000, memory_mb=2048, cached=["main"])
+                cpu_ms=20000, clock_ms=60000, memory_mb=1024, cached=["main"])
         out["checks"].append(("编译", r.get("status") == "Accepted",
                               str(r.get("status")) + " " +
                               (r.get("files", {}).get("stderr", b"")[:200].decode(

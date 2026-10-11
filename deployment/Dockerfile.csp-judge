@@ -1,0 +1,23 @@
+FROM ubuntu:20.04
+
+ARG GCC_VERSION=9.3.0-10ubuntu2
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates tini python3 libc6-dev binutils \
+    gcc-9-base=${GCC_VERSION} gcc-9=${GCC_VERSION} g++-9=${GCC_VERSION} \
+    cpp-9=${GCC_VERSION} libgcc-9-dev=${GCC_VERSION} libstdc++-9-dev=${GCC_VERSION} libasan5=${GCC_VERSION} \
+    && ln -sf /usr/bin/g++-9 /usr/bin/g++ \
+    && ln -sf /usr/bin/gcc-9 /usr/bin/gcc \
+    && g++ -dumpfullversion | grep -x '9.3.0' \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt
+# criyle/go-judge v1.12.0 binary, read-only extraction from the existing server sandbox.
+# The recorded SHA256 is checked before building; see deployment records.
+COPY go-judge /opt/go-judge
+COPY mount.yaml /opt/mount.yaml
+RUN chmod 0755 /opt/go-judge \
+    && /opt/go-judge -version | grep 'v1.12.0' \
+    && printf 'judge:x:1536:1536:judge:/w:/bin/sh\n' > /opt/containerPasswd.txt \
+    && touch /opt/dotenv
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/go-judge"]
+CMD ["-http-addr", "0.0.0.0:5050", "-mount-conf", "/opt/mount.yaml", "-parallelism", "1", "-pre-fork", "1", "-no-fallback", "-dir", "/cache", "-release"]

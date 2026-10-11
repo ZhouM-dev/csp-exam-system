@@ -81,11 +81,14 @@
     var serverNow = (opts && opts.now !== undefined)
       ? toMs(opts.now)
       : toMs(attr(bar, ['data-server-now', 'data-now']));
-    var skewMs = serverNow ? (serverNow - Date.now()) : 0;
+    var anchoredAt = performance.now(), anchorNow = serverNow || Date.now();
+    if (bar && bar._cspTimer) clearInterval(bar._cspTimer);
+    var clock = function () { return anchorNow + performance.now() - anchoredAt; };
+    if (bar) bar._cspClock = clock;
     var timer = null;
 
     function leftSec() {
-      return Math.max(0, Math.floor((end - (Date.now() + skewMs)) / 1000));
+      return Math.max(0, Math.ceil((end - clock()) / 1000));
     }
 
     function tick() {
@@ -108,6 +111,7 @@
 
     tick();
     timer = setInterval(tick, 1000);
+    if (bar) bar._cspTimer = timer;
     return timer;
   };
 
@@ -115,7 +119,71 @@
   window.countdownLeft = function (bar) {
     var end = toMs(attr(bar, ['data-deadline', 'data-deadline-ms']));
     if (!end) return 0;
-    return Math.max(0, Math.floor((end - Date.now()) / 1000));
+    return Math.max(0, Math.ceil((end - (bar && bar._cspClock ? bar._cspClock() : Date.now())) / 1000));
+  };
+
+  // 候考和考试共用服务器时间窗口；只有服务器确认开考，才进入题目页。
+  window.initContestWindow = function (cfg) {
+    var end = cfg.end_at, start = cfg.start_at, now = cfg.server_now;
+    var anchor = performance.now(), busy = false, navigating = false, lastCheck = -Infinity;
+    var countdown = document.getElementById('wait-countdown');
+    var note = document.getElementById('wait-status');
+    function clock() { return now + (performance.now() - anchor) / 1000; }
+    function navigate(enter) {
+      if (navigating) return;
+      navigating = true;
+      document.body.replaceChildren();
+      if (enter) location.replace(cfg.hall_url); else location.reload();
+    }
+    function tick() {
+      if (navigating) return;
+      if (cfg.phase === 'pending' && countdown) {
+        var left = Math.max(0, Math.ceil(start - clock()));
+        countdown.textContent = fmt(left);
+        if (!left) {
+          if (note) note.textContent = '正在确认开考状态，请稍候…';
+          check();
+        }
+      }
+      if (cfg.phase === 'running' && end && clock() >= end) navigate(false);
+    }
+    async function check() {
+      if (busy || navigating || performance.now() - lastCheck < 1500) return;
+      busy = true; lastCheck = performance.now();
+      var abort = new AbortController(), timeout = setTimeout(function () { abort.abort(); }, 8000);
+      try {
+        var response = await fetch(cfg.url, { cache: 'no-store', credentials: 'same-origin', signal: abort.signal });
+        if (!response.ok) throw new Error('clock');
+        var state = await response.json();
+        if (!['pending', 'unscheduled', 'running', 'ended'].includes(state.phase)
+            || !Number.isFinite(state.server_now) || !Number.isFinite(state.start_at)
+            || !Number.isFinite(state.end_at)) throw new Error('clock');
+        if (state.phase !== cfg.phase) { navigate(state.phase === 'running'); return; }
+        if (cfg.phase !== 'running' && (start !== state.start_at || end !== state.end_at)) {
+          navigate(false); return; // 重排时间后同步更新候考页上的日期和时长。
+        }
+        if (end !== state.end_at) {
+          var bar = document.querySelector('.timer-bar');
+          if (bar) {
+            bar.setAttribute('data-deadline', state.end_at);
+            bar.setAttribute('data-server-now', state.server_now);
+            var form = document.querySelector('form[data-submit-guard]');
+            if (form) form.classList.remove('is-closed');
+            window.initCountdown(bar.querySelector('.timer-value'), bar, state.end_at, { now: state.server_now });
+            var timerNote = bar.querySelector('.timer-note');
+            if (timerNote) timerNote.textContent = '结束时间已调整，请以当前倒计时为准。';
+          }
+        }
+        start = state.start_at; end = state.end_at; now = state.server_now; anchor = performance.now();
+        if (note) note.textContent = cfg.phase === 'pending'
+          ? '你已进入候考区，开考后将自动进入考试。' : note.textContent;
+        tick();
+      } catch (e) {
+        if (note) note.textContent = '暂时无法连接服务器，正在自动重试…';
+      } finally { clearTimeout(timeout); busy = false; }
+    }
+    tick(); check(); setInterval(check, 2000); setInterval(tick, 200);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
   };
 
   /* ================= 悬浮窗（配合 ui.py 的 modal() 外壳）=================
@@ -217,7 +285,7 @@
       bar.className = 'code-copy-bar';
       var btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'btn btn-sm btn-gray';
+      btn.className = 'btn btn-sm btn-gray btn-secondary';
       btn.textContent = '复制代码';
       btn.addEventListener('click', function () {
         copyText(pre.textContent || '', function (ok) {

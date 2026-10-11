@@ -9,7 +9,6 @@ from __future__ import annotations
 
 
 import traceback
-import hmac
 import json
 import os
 import re
@@ -21,17 +20,19 @@ import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from socketserver import ThreadingMixIn
 
-from ..core import store
+from ..core import store, contest_time
 from ..config import JUDGE_SLOTS, MAX_UPLOAD
 from ..core.util import log
-from ..config import PORT, PS_DOC, PS_JOBS, PS_JOBS_LOCK
+from ..config import PORT, BIND, COOKIE_SECURE, PUBLIC_ORIGIN, PS_DOC, PS_JOBS, PS_JOBS_LOCK
 from ..core.security import (ADMIN_COOKIE, make_admin_cookie, parse_admin_cookie,
-                              parse_cookie)
+                              parse_cookie, matches_secret)
 from .multipart import _decode_name, _fix_filename, _read_zip  # noqa: F401
 from .urls import admin_url, cid_query
 from .ui import page
 from .student_pages import StudentPages
 from .admin_pages import AdminPages
+
+_UPLOAD_SLOTS = threading.BoundedSemaphore(2)
 
 
 class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
@@ -40,6 +41,16 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
     def setup(self):
         super().setup()
         self.connection.settimeout(30)
+
+    def end_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        super().end_headers()
+
+    def _cookie_header(self, cookie):
+        if COOKIE_SECURE and "secure" not in cookie.lower().split("; "):
+            cookie += "; Secure"
+        self.send_header("Set-Cookie", cookie)
 
     def _request_size(self, max_bytes):
         try:
@@ -72,6 +83,16 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         self.send_header("Vary", "Origin")
 
     def _send(self, body: bytes, status: int = 200, cookie: str = "") -> None:
+        context = getattr(self, "_contest_clock", None)
+        if context:
+            cid, state = context
+            # Poll only public timing fields. Hide stale exam content at the server deadline.
+            start, end = contest_time.window(store.get_contest(cid))
+            cfg = json.dumps({"url": "/api/contest-state?c=" + urllib.parse.quote(cid), "phase": state,
+                              "hall_url": "/hall?c=" + urllib.parse.quote(cid), "start_at": start,
+                              "end_at": end, "server_now": time.time()}).replace("<", "\\u003c")
+            script = ("<script>window.initContestWindow(" + cfg + ");</script>").encode("utf-8")
+            body = body.replace(b"</body>", script + b"</body>")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -79,16 +100,17 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "same-origin")
         self._cors_headers()
         if cookie:
-            self.send_header("Set-Cookie", cookie)
+            self._cookie_header(cookie)
         self.end_headers()
         self.wfile.write(body)
 
     def _redirect(self, to: str, cookie: str = "") -> None:
         self.send_response(302)
         self.send_header("Location", to)
+        self.send_header("Cache-Control", "no-store")
         self._cors_headers()
         if cookie:
-            self.send_header("Set-Cookie", cookie)
+            self._cookie_header(cookie)
         self.send_header("Content-Length", "0")
         self.end_headers()
 
@@ -129,7 +151,7 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         return kaohao
 
     def _serve_static(self, path: str, prefix: str, root: str) -> None:
-        """提供包内静态文件（KaTeX 字体/脚本）。只允许白名单后缀，且必须落在 root 里。"""
+        """提供本地 Tabler、考试组件与 KaTeX 资产；只允许白名单后缀。"""
         rel = urllib.parse.unquote(path[len(prefix):]).replace("\\", "/").lstrip("/")
         safe = os.path.normpath(rel)
         if not rel or safe.startswith("..") or os.path.isabs(safe):
@@ -154,7 +176,9 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "public, max-age=2592000")     # 静态资源缓存 30 天
+        cache = ("public, max-age=0, must-revalidate" if safe in
+                 ("exam-components.css", "scoreboard.css", "contest.js", "submission.js", "admin-ui.js") else "public, max-age=2592000")
+        self.send_header("Cache-Control", cache)
         self.end_headers()
         self.wfile.write(data)
 
@@ -172,7 +196,7 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
 
     def _check_admin(self, key: str) -> bool:
         """管理端认证：URL 带对密钥，或之前登过（cookie）。"""
-        if key and hmac.compare_digest(key, store.admin_key()):
+        if key and matches_secret(key, store.admin_key()):
             return True
         return parse_admin_cookie(self._cookies().get(ADMIN_COOKIE, ""))
 
@@ -239,6 +263,8 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
     def do_GET(self):
         try:
             self._route_get()
+        except ValueError as e:
+            self._send(page("请求无效", self._flash("err", str(e))), 400)
         except Exception:
             log("处理 GET 出错：\n" + traceback.format_exc())
             self._send(page("出错了", self._flash("err", "服务器内部错误，请稍后重试。")), 500)
@@ -252,7 +278,12 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            self._route_post()
+            path = urllib.parse.urlparse(self.path).path
+            if path in ('/upload', '/api/problemset/import', '/admin/problem', '/admin/problem-reupload'):
+                with _UPLOAD_SLOTS:
+                    self._route_post()
+            else:
+                self._route_post()
         except ValueError as e:
             self._send(page("请求无效", self._flash("err", str(e))), 400)
         except Exception:
@@ -261,15 +292,32 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
 
     # ---------- 路由 ----------
     def _route_get(self):
+        self._contest_clock = None
         q = self._query()
         path = urllib.parse.urlparse(self.path).path
 
+        if path == "/api/contest-state":
+            c = store.get_contest(q.get("c", ""))
+            if not c:
+                return self._json({"error": "比赛不存在"}, 404)
+            start, end = contest_time.window(c)
+            return self._json({"phase": contest_time.phase(c), "server_now": time.time(),
+                               "start_at": start, "end_at": end})
         if path == "/health":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.end_headers()
             self.wfile.write(b"ok")
             return
+        if path in ('/source', '/source/'):
+            body = ('<div class="card"><h2>开源许可与源码</h2>'
+                    '<p>评测服务采用 HydroJudge（AGPL-3.0-or-later）与 go-judge；界面采用 Tabler（MIT）。</p>'
+                    '<p><a href="https://github.com/hydro-dev/Hydro">Hydro 上游源码与许可</a> · '
+                    '<a href="https://github.com/criyle/go-judge">go-judge 上游源码</a> · '
+                    '<a href="https://github.com/tabler/tabler">Tabler 上游源码与许可</a></p>')
+            if PUBLIC_ORIGIN:
+                body += '<p><a href="' + html.escape(PUBLIC_ORIGIN + '/source/adapter-source.tgz') + '">本部署的 Hydro 适配源码</a></p>'
+            return self._send(page('开源许可与源码', body + '</div>'))
         if path == "/admin/login":
             from .scoreboard import login_route; return login_route(self, q)
         if path in ("/scoreboard", "/admin/scoreboard", "/api/scoreboard"):
@@ -288,6 +336,9 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
             return
 
         # ---- 管理端
+        if path == "/admin/problem-export":
+            from .problem_export import route
+            return route(self, q)
         if path == "/admin":
             key = q.get("key", "")
             if not self._check_admin(key):
@@ -333,10 +384,10 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
         if path == "/admin/problem-detail":     # 题目详情（左改右看：题面+题目名+英文名+标程）
             self._admin_problem_detail(q, flash=q.get("m", ""))
             return
-        if path.startswith("/static/katex/"):
-            self._serve_static(path, "/static/katex/",
+        if path.startswith("/static/"):
+            self._serve_static(path, "/static/",
                                os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                            "static", "katex"))
+                                            "static"))
             return
         if path == "/api/problems":
             self._api_problem_catalog(q)
@@ -430,6 +481,11 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
                     f'<a class="btn btn-gray" href="/help?c={urllib.parse.quote(cid)}">考生须知</a></p>'),
                     403)
                 return
+            state = contest_time.phase(contest)
+            self._contest_clock = (cid, state)
+            if state != "running" and not (state == "ended" and path in ("/score", "/file")
+                                            and store.load_exam(cid).get("released")):
+                return self._contest_status(contest, cid, 200 if path == "/hall" else 403)
             if path == "/hall":
                 self._hall_page(kaohao, contest, cid)
             elif path == "/score":
@@ -446,11 +502,21 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
                 self._submit_page(kaohao, contest, cid, q.get("p", ""))
             return
         if path == "/logout":
-            self._redirect("/", cookie="csp=; Max-Age=0; Path=/")
+            session = self._session()
+            cid = q.get("c", "") or (session[0] if session else "")
+            target = "/enter" + ("?c=" + urllib.parse.quote(cid) if store.get_contest(cid) else "")
+            self._redirect(target, cookie="csp=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax")
             return
         self._send(page("页面不存在", '<p>没有这个页面。<a href="/">回到首页</a></p>'), 404)
 
     def _route_post(self):
+        origin = self.headers.get("Origin")
+        expected = PUBLIC_ORIGIN or "http://" + (self.headers.get("Host") or "")
+        if origin and origin != expected:
+            # The local authoring tool may use file:// only with an explicit key.
+            supplied = self._query().get("key", "")
+            if not supplied or not matches_secret(supplied, store.admin_key()):
+                return self._json({"error": "请求来源不匹配"}, 403)
         path = urllib.parse.urlparse(self.path).path
         if path == "/admin/login":
             from .scoreboard import login_route; return login_route(self, self._query(), post=True)
@@ -509,14 +575,21 @@ class Handler(StudentPages, AdminPages, BaseHTTPRequestHandler):
 
 
 def main():
+    from ..core.runtime_lock import data_lock
+    with data_lock(store.DATA_DIR):
+        _serve_main()
+
+
+def _serve_main():
     store.admin_key()      # 确保密钥已生成
     from ..core import grading
+    grading._start_worker()
     threading.Thread(target=grading.recover_submissions, name="csp-recover", daemon=True).start()
     contests = store.list_contests()
     log(f"比赛服务启动，端口 {PORT}，共 {len(contests)} 场比赛："
         + "、".join(f"{c['title']}({c['rule']})" for c in contests) if contests
         else f"比赛服务启动，端口 {PORT}（还没有比赛，先去管理端新建）")
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server = ThreadingHTTPServer((BIND, PORT), Handler)
     server.daemon_threads = True
     try:
         server.serve_forever()

@@ -28,42 +28,71 @@ import time
 import traceback
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+import shutil
 from .util import log, _fmt_ms, _fmt_kb
 from . import wrapper
-from ..config import MAX_JUDGE_QUEUE
-from . import store, judge_result as verdict, judgelocal, localoj, submissions
+from . import store, judge_result as verdict, judgelocal, localoj, submissions, task_queue
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="csp-judge")
-_QUEUE_SLOTS = threading.BoundedSemaphore(MAX_JUDGE_QUEUE)
+_QUEUE_SLOTS = None  # Compatibility for older regression fixtures; no in-memory queue cap.
+_WORKER_LOCK = threading.Lock()
+_WORKER_STARTED = False
+_WAKE = threading.Event()
 
 
 def reserve_submission() -> bool:
-    return _QUEUE_SLOTS.acquire(blocking=False)
+    return shutil.disk_usage(store.DATA_DIR).free > 512 * 1024 * 1024
 
 
 def release_submission() -> None:
-    _QUEUE_SLOTS.release()
+    pass
 
 
 def enqueue_submission(cid, kaohao, picked, exam, submission_id, *, reserved=False):
-    if not reserved and not reserve_submission():
-        raise ValueError("评测队列已满，请稍后再提交。")
+    task_queue.put(cid, kaohao, picked, exam, submission_id)
+    _WAKE.set()
+    _start_worker()
 
-    def work():
+
+def _start_worker():
+    global _WORKER_STARTED
+    with _WORKER_LOCK:
+        if not _WORKER_STARTED:
+            task_queue.recover()
+            threading.Thread(target=_work_queue, name='csp-judge', daemon=True).start()
+            _WORKER_STARTED = True
+
+
+def _work_queue():
+    while True:
+        jid, attempts = None, 0
         try:
-            for attempt in range(3):
-                if not safe_judge_csp(cid, kaohao, picked, exam, submission_id):
-                    break
-                if attempt < 2:
-                    time.sleep(1)
-        finally:
-            release_submission()
-    try:
-        return _EXECUTOR.submit(work)
-    except Exception:
-        release_submission()
-        raise
+            minimum = int(os.environ.get('CSP_JUDGE_MIN_AVAILABLE_MB', '0'))
+            if minimum and os.path.exists('/proc/meminfo'):
+                available = next(int(line.split()[1]) // 1024 for line in Path('/proc/meminfo').read_text().splitlines()
+                                 if line.startswith('MemAvailable:'))
+                if available < minimum:
+                    _WAKE.wait(2); _WAKE.clear(); continue
+            job = task_queue.claim()
+            if not job:
+                _WAKE.wait(1); _WAKE.clear(); continue
+            jid, payload, attempts = job
+            retry = bool(safe_judge_csp(*payload))
+            if retry:
+                cid, kh, _, _, sid = payload
+                with store._LOCK:
+                    current = store.load_results(cid).get(kh, {})
+                    if current.get('submission_id') == sid:
+                        current.update(submission_state='queued', judging=True)
+                        store.put_result(cid, kh, current)
+            task_queue.complete(jid, retry=retry, attempts=attempts)
+        except Exception:
+            if jid is not None:
+                try:
+                    task_queue.complete(jid, retry=True, attempts=attempts)
+                except Exception:
+                    pass  # Startup recovery also restores a claimed job after a DB outage.
+            log('评测队列暂时不可用：' + traceback.format_exc())
+            _WAKE.wait(5); _WAKE.clear()
 
 
 def recover_submissions():
@@ -74,7 +103,6 @@ def recover_submissions():
             sid = entry.get("submission_id")
             # 历史资料缺失不是临时沙箱错误，重启不能把它重新排队并误认证为完成。
             if sid and not entry.get("rejudge_error") and entry.get("submission_state") in ("queued", "judging", "error"):
-                _QUEUE_SLOTS.acquire()
                 picked = {int(k): v for k, v in (entry.get("picked") or {}).items()}
                 enqueue_submission(cid, kaohao, picked, entry.get("submission_exam") or store.load_exam(cid), sid, reserved=True)
 
@@ -175,7 +203,7 @@ def rejudge_contest(cid: str) -> int:
                     issues[kaohao] = str(error)
             for _ in prepared:
                 if not reserve_submission():
-                    raise ValueError("评测队列空间不足，请稍后重测")
+                    raise ValueError("存储空间不足，请先备份并清理历史档案")
                 reserved += 1
             backup = os.path.join(store.DATA_DIR, "contests", cid, "rejudge", uuid.uuid4().hex)
             store._save(os.path.join(backup, "results.json"), results)
@@ -532,7 +560,7 @@ def _apply_result(cid: str, kaohao: str, prob_no: int, row: dict, *, best_of: bo
                        or (submission_id and old.get("submission_id") == submission_id) else 1),
         }
         attempt.update(_side_texts(row))    # 编译报错 / 评测机评语原文（有才存）
-        for field in ("environment", "official_time_ms", "effective_time_ms", "time_scale", "calibrated", "reference_time"):
+        for field in ("engine", "environment", "official_time_ms", "effective_time_ms", "time_scale", "calibrated", "reference_time"):
             if field in row:
                 attempt[field] = row[field]
         if status == 8:
@@ -579,11 +607,9 @@ def _apply_result(cid: str, kaohao: str, prob_no: int, row: dict, *, best_of: bo
 def judge_csp(cid: str, kaohao: str, picked: dict, exam: dict, submission_id: str = "") -> bool:
     """三种赛制共用的判分：交文件夹、逐题判。picked = {题号: 相对路径}。
 
-    **判题在本地跑**（`core/judgelocal.py` + go-judge 沙箱），不再提交给 Hydro：
-    以前是「改学生的代码（freopen 垫片）→ 提交给评测机 → 读回记录」，
-    现在是「原样编译学生的代码 → 在沙箱里逐点跑 → 自己按 CSP 口径比对」。
-    最大的差别是 **I/O 口径由我们定**（`io_mode`），同一份代码不会再因为
-    "包不包垫片"判出两个结果 —— 老师反馈过的那个差异就是这么来的。
+    原始源码与测试点交给 HydroJudge，编译、执行和答案检查使用上游实现。
+    file / stdin 由 HydroJudge 的 filename 配置区分；不注入 freopen。
+    这里仅负责提交快照、赛制成绩与公开状态。
 
     **赛制差异只在这里分叉**（别再把它们混成一套）：
 

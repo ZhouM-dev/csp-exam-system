@@ -53,6 +53,10 @@ def problem_detail_url(key: str, pid: str = "", msg: str = "") -> str:
     return "/admin/problem-detail" + (("?" + "&".join(parts)) if parts else "")
 
 
+def problem_export_url(key: str, pid: str) -> str:
+    return "/admin/problem-export?" + urllib.parse.urlencode({**({"key": key} if key else {}), "pid": pid})
+
+
 def admin_url(key: str, cid: str = "", msg: str = "", path: str = "/admin") -> str:
     """管理端跳转用的地址。踩过：直接 "/admin" + cid_query(...) + "?m=" 会拼出两个问号，
     结果 c 变成 "c2?m=..."，消息也丢了。"""

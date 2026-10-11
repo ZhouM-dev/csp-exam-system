@@ -31,16 +31,18 @@ import time
 import urllib.parse
 import html
 
+from ..core import contest_time
 from ..core import judge_result as verdict, judgelocal, localoj, problems as make_problem, store
 from ..core import importer as import_problemset
 from ..core import wrapper, submissions
 from ..core.grading import graded_cell, graded_text
 from ..core.util import log, _fmt_bytes, _fmt_ms, _fmt_kb
-from ..config import (HERE, MAX_PS_UPLOAD, PORT, PS_JOBS, PS_JOBS_LOCK,
+from ..config import (MAX_PS_UPLOAD, PORT, PS_JOBS, PS_JOBS_LOCK,
                       )
-from .urls import admin_url, cid_query, problem_detail_url, statement_url
+from .urls import admin_url, cid_query, problem_detail_url, statement_url, problem_export_url
 from .ui import (page, rule_badge, render_upload_tree_html, md_to_html,
                  level_badge, modal, code_pre)
+from .tabler_theme import components
 
 
 def _js_json(obj) -> str:
@@ -86,6 +88,7 @@ def _problem_info_path() -> str:
 remember_problem = make_problem.remember_problem
 
 
+@make_problem._metadata_write
 def remember_meta(pid: str, *, title: str = "", name: str = "", time_ms=None,
                   memory_mb=None) -> dict:
     """改一道题的元信息（题目详情页的「保存修改」用）：题目名 / 英文名 / 时限 / 内存。
@@ -135,6 +138,11 @@ def remember_meta(pid: str, *, title: str = "", name: str = "", time_ms=None,
     rec = dict(codes.get(pid) or {})
     old_title = str(info0.get("title") or rec.get("title") or "")
     old_name = str(rec.get("name") or info0.get("name") or "")
+    try:
+        synced = store.sync_problem_name(pid, name, old_name, dry_run=True)
+    except ValueError as error:
+        out["error"] = str(error)
+        return out
     if not title:
         if old_title:
             skipped.append("题目名（留空没改 —— 清掉就认不出是哪道题了）")
@@ -148,15 +156,14 @@ def remember_meta(pid: str, *, title: str = "", name: str = "", time_ms=None,
         rec.setdefault("code", make_problem.code_of_pid(pid, codes) or "")
         rec["at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         codes[pid] = rec
-        make_problem.save_codes(codes)
     old_ms, old_mb = int(info0.get("time_ms") or 0), int(info0.get("memory_mb") or 0)
-    if not time_ms:
+    if time_ms <= 0:
         if old_ms:
             skipped.append("时限（要正整数，没改）")
         time_ms = 0
     elif time_ms != old_ms:
         changed.append("时限")
-    if not memory_mb:
+    if memory_mb <= 0:
         if old_mb:
             skipped.append("内存（要正整数，没改）")
         memory_mb = 0
@@ -164,6 +171,15 @@ def remember_meta(pid: str, *, title: str = "", name: str = "", time_ms=None,
         changed.append("内存")
     # 题目名/时限/内存落 `problem_info.json`（`remember_problem` 里空值不覆盖，正合适）
     remember_problem(pid, title=title, time_ms=time_ms or None, memory_mb=memory_mb or None)
+    # 限额的在评测检查成功后，才保存标题和英文名，避免拒绝时留下半次修改。
+    if rec != (codes.get(pid) or {}) or any(x in changed for x in ("题目名", "英文名")):
+        make_problem.save_codes(codes)
+    # Keep the library/export view in agreement with the registry, including
+    # clearing a default name; empty values must not revive stale fallback data.
+    info = load_problem_info()
+    info[pid]["name"] = name
+    save_problem_info(info)
+    store.sync_problem_name(pid, name, old_name)
     # 题库清单是**缓存**（列表页先读它）：不刷新的话，改了题目名要等下一次刷新才看得见
     try:
         store.save_catalog(localoj.list_problems())
@@ -172,6 +188,7 @@ def remember_meta(pid: str, *, title: str = "", name: str = "", time_ms=None,
     out["ok"] = True
     out["changed"] = changed
     out["skipped"] = skipped
+    out["synced_contests"] = synced
     return out
 
 
@@ -515,9 +532,7 @@ function cspRenderMath(root) {
     window.renderMathInElement(root, {
       delimiters: [
         { left: "$$", right: "$$", display: true },
-        { left: "\\\\[", right: "\\\\]", display: true },
-        { left: "$", right: "$", display: false },
-        { left: "\\\\(", right: "\\\\)", display: false }
+        { left: "$", right: "$", display: false }
       ],
       throwOnError: false,
       ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code", "option"]
@@ -813,6 +828,31 @@ def _view_modal() -> str:
 
 
 
+def _admin_upload_picker(folder_id, zip_id, *, clear_id=""):
+    """One Tabler upload panel with two native choices, sharing the same form."""
+    clear_attr = f' id="{clear_id}"' if clear_id else ''
+    return f'''<div class="csp-admin-upload bg-body-tertiary p-3 mb-3"
+        data-admin-upload data-folder-id="{folder_id}" data-zip-id="{zip_id}">
+      <div class="d-flex flex-wrap align-items-center gap-3">
+        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" fill="none"
+          stroke="currentColor" stroke-width="1.5" class="text-secondary" aria-hidden="true">
+          <path d="M5 20v3h18v-3M14 19V5M8 11l6-6 6 6"/></svg>
+        <div class="flex-fill"><div class="fw-semibold">上传题目文件夹或 ZIP</div>
+          <div class="text-secondary small upload-note" data-admin-upload-status role="status"
+            aria-live="polite">尚未选择文件。</div></div>
+        <div class="dropdown">
+          <button type="button" class="btn btn-outline-primary dropdown-toggle"
+            data-bs-toggle="dropdown" aria-expanded="false">选择上传内容</button>
+          <div class="dropdown-menu dropdown-menu-end">
+            <button type="button" class="dropdown-item" data-admin-picker="folder">选择文件夹</button>
+            <button type="button" class="dropdown-item" data-admin-picker="zip">选择 ZIP 压缩包</button>
+          </div>
+        </div>
+        <button type="button" class="btn btn-sm btn-gray" data-admin-upload-clear{clear_attr}>清空</button>
+      </div>
+    </div>'''
+
+
 class AdminPages:
     """管理端的所有页面与接口（由 web.server.Handler 混入）。"""
 
@@ -821,11 +861,7 @@ class AdminPages:
         self._send(render_login(getattr(self, "path", "/admin")), 403)
 
     def _admin_nav(self, key: str = "", cid: str = "") -> str:
-        """管理端顶部那排快捷入口。
-
-        **常驻**（`position: sticky`，见 CSS 的 `.admin-nav`）：页面往下滚也一直贴在顶部，
-        省得改完题目表还要滚回最上面点「本场管理」。
-        """
+        """Tabler 官方纵向导航布局，入口和鉴权参数沿用原实现。"""
         links = ['<a href="' + admin_url(key) + '">比赛列表</a>']
         if cid:
             links.append(f'<a href="{admin_url(key, cid)}">本场管理</a>')
@@ -837,7 +873,19 @@ class AdminPages:
         links.append(f'<a href="{admin_url(key, path="/admin/problem")}">新建题目</a>')
         links.append('<a href="/docs/problemset" target="_blank">导入题单文档</a>')
         links.append('<a href="/" target="_blank">学生端入口</a>')
-        return '<nav class="muted admin-nav">管理端 · ' + " · ".join(links) + "</nav>"
+        items = []
+        for link in links:
+            # 复用已有安全 URL；只套官方 nav-link / nav-item 组件。
+            link = link.replace('<a ', '<a class="nav-link" ', 1)
+            items.append('<li class="nav-item">' + link + '</li>')
+        return ('<aside id="csp-admin-sidebar" class="navbar navbar-vertical navbar-expand-lg" '
+                'aria-label="管理导航"><div class="container-fluid">'
+                '<button class="navbar-toggler" type="button" data-bs-toggle="collapse" '
+                'data-bs-target="#sidebar-menu" aria-controls="sidebar-menu" '
+                'aria-expanded="false" aria-label="展开管理导航"><span class="navbar-toggler-icon"></span></button>'
+                '<a class="navbar-brand navbar-brand-autodark" href="' + admin_url(key) + '">CSP 考试管理</a>'
+                '<div class="collapse navbar-collapse" id="sidebar-menu"><ul class="navbar-nav pt-lg-3">'
+                + ''.join(items) + '</ul></div></div></aside>')
 
     def _admin_home(self, q: dict, cookie: str = "", flash: str = ""):
         key = q.get("key", "")
@@ -914,7 +962,7 @@ class AdminPages:
                 + (f'<br><span style="font-size:12.5px">{chips}</span>' if chips else "")
                 + f'</td>'
                 f'<td>{len(roster)}</td><td>{len(results)}</td>'
-                f'<td>{"开放" if c.get("open", True) else "关闭"} / '
+                f'<td>{contest_time.LABELS[contest_time.phase(c)]} / '
                 f'{"已公布" if rel else "未公布"}</td>'
                 f'<td class="muted">{html.escape(c.get("created_at", ""))}</td>'
                 f'<td><a class="btn btn-sm" href="/admin{cid_query(key, c["id"])}">管理</a> '
@@ -1064,6 +1112,28 @@ class AdminPages:
 """
         self._send(page("管理端 · 比赛列表", body), cookie=cookie)
 
+    def _schedule_fields(self, contest=None):
+        from ..core import contest_time
+        start, end = contest_time.window(contest)
+        return (f'<div class="row" style="margin-top:12px"><span>开始时间（北京时间）</span>'
+                f'<input required type="datetime-local" step="1" name="start_at" '
+                f'value="{contest_time.input_value(start)}">'
+                f'<span>结束时间（北京时间）</span>'
+                f'<input required type="datetime-local" step="1" name="end_at" '
+                f'value="{contest_time.input_value(end)}"></div>'
+                '<p class="muted">按服务器时间自动开赛、结束。开赛前仅显示标题；结束后隐藏题目并拒绝提交。'
+                '时长用于自动填写结束时间，也可直接修改结束时间。</p>'
+                '<script>(()=>{const s=document.currentScript.previousElementSibling.previousElementSibling;'
+                'const a=s.querySelector("[name=start_at]"),b=s.querySelector("[name=end_at]");'
+                'const f=s.closest("form"),d=f.querySelector("[name=duration]");'
+                'const sync=()=>{if(!a.value||!d.value)return;const t=new Date(a.value+"+08:00");'
+                'if(Number.isNaN(t.getTime()))return;'
+                'b.value=new Date(t.getTime()+Number(d.value)*60000+8*3600000).toISOString().slice(0,19);};'
+                'a.addEventListener("change",sync);d.addEventListener("input",sync);'
+                'const l=f.querySelector("[name=level]");if(l)l.addEventListener("change",()=>setTimeout(sync,0));'
+                'b.addEventListener("change",()=>{if(a.value&&b.value)d.value=Math.ceil('
+                '(new Date(b.value+"+08:00")-new Date(a.value+"+08:00"))/60000);});})();</script>')
+
     def _admin_new_page(self, q: dict):
         key = q.get("key", "")
         if not self._check_admin(key):
@@ -1087,7 +1157,7 @@ class AdminPages:
   <input type="text" name="title" placeholder="例如 2026 CSP-J 模拟赛" style="width:320px;max-width:100%">
   <span>赛制</span>
   <select name="rule" style="width:200px">
-    {"".join(f'<option value="{k}">{html.escape(v["name"])}</option>' for k, v in store.RULES.items())}
+    {"".join(f'<option value="{k}"{" selected" if k == store.DEFAULT_RULE else ""}>{html.escape(v["name"])}</option>' for k, v in store.RULES.items())}
   </select>
 </div>
 <div class="row" style="margin-top:10px">
@@ -1097,6 +1167,7 @@ class AdminPages:
   <input type="text" name="duration" id="csp-new-duration"
          value="{store.LEVEL_MINUTES[store.DEFAULT_LEVEL]}" style="width:70px"> 分钟
 </div>
+{self._schedule_fields()}
 <p class="muted" style="margin-top:10px">级别决定考号格式与默认时长：入门级
   <code>GD-J·····</code>、提高级 <code>GD-S·····</code>（5 位纯随机数，不是从 1 顺着排）。
   学生交完只看到「已提交」，成绩由老师点「公布成绩」后才可见。</p>
@@ -1200,7 +1271,7 @@ class AdminPages:
 <div class="kv card">
   <div><b>名单</b>{len(roster)} 人</div>
   <div><b>已提交</b>{len(results)} 人</div>
-  <div><b>提交开关</b>{"开放" if contest.get("open", True) else "已关闭"}</div>
+  <div><b>比赛状态</b>{contest_time.LABELS[contest_time.phase(contest)]}</div>
   <div><b>成绩</b>{"已公布" if exam.get("released") else "未公布"}</div>
 </div>
 <p>
@@ -1208,13 +1279,10 @@ class AdminPages:
     <input type="hidden" name="released" value="{0 if exam.get('released') else 1}">
     <button type="submit" class="{'btn-gray' if exam.get('released') else ''}">
       {"收回成绩公布" if exam.get("released") else "公布成绩"}</button></form>
-  <form method="post" action="/admin/release{cid_query(key, cid)}" style="display:inline">
-    <input type="hidden" name="open" value="{0 if contest.get('open', True) else 1}">
-    <button type="submit" class="btn-gray">{"关闭提交" if contest.get("open", True) else "开放提交"}</button></form>
 </p>
 
 <!-- 整个页面只有底部一个「保存」按钮：本场设置 + 名单 + 题目 三个区域在同一个表单里，
-     点一次一起提交。上面那两个按钮（公布成绩 / 关闭提交）是立即生效的动作开关，
+     点一次一起提交。上面的公布成绩按钮是立即生效的动作，
      不是"保存"，所以留在表单外面（表单不能嵌套）。 -->
 <form method="post" action="/admin/release{cid_query(key, cid)}" id="csp-save-all">
 <input type="hidden" name="action" value="save_all">
@@ -1230,6 +1298,7 @@ class AdminPages:
      value="{html.escape(contest.get("prefix", store.DEFAULT_PREFIX))}"
      style="width:70px;display:inline-block">
 </div>
+{self._schedule_fields(contest)}
 <p class="muted" style="margin-top:10px">{("本场已经有人提交，级别已锁住，要换级别请先删掉本场成绩"
    "（或新建一场考试）。" if has_results else "改级别等于重发本场考号（考号里的 J/S 跟着级别走）。")}</p>
 </div>
@@ -1345,11 +1414,11 @@ class AdminPages:
       var tr = document.createElement('tr');
       tr.innerHTML = '<td>第 ' + (i + 1) + ' 题</td>' +
         '<td><b>' + (p.number ? esc(p.number) : '<span class="muted">—</span>') + '</b></td>' +
-        '<td><input type="text" class="csp-name" value="' + esc(p.name) + '" ' +
+        '<td><input type="text" class="csp-name form-control form-control-sm" value="' + esc(p.name) + '" ' +
             'placeholder="如 candy" style="width:150px;padding:5px 8px;font-size:14px"></td>' +
         '<td>' + (esc(p.title) || esc(titleOf(p.pid)) || '（题库里没找到题目，可以点「刷新题库」重试）') + '</td>' +
         '<td class="csp-files">' + openFileCell(p.name) + '</td>' +
-        '<td><input type="text" class="csp-full" value="' + esc(p.full) + '" ' +
+        '<td><input type="text" class="csp-full form-control form-control-sm" value="' + esc(p.full) + '" ' +
             'style="width:60px;padding:5px 8px;font-size:14px"></td>' +
         '<td></td>';
       var nm = tr.querySelector('.csp-name');
@@ -1362,19 +1431,19 @@ class AdminPages:
       fl.addEventListener('input', function () {{ current[i].full = fl.value; sync(); }});
       var ops = tr.lastChild;
       var up = document.createElement('button');
-      up.type = 'button'; up.textContent = '↑'; up.className = 'btn-sm btn-gray';
+      up.type = 'button'; up.textContent = '↑'; up.className = 'btn btn-sm btn-gray btn-secondary';
       up.title = '上移';
       up.addEventListener('click', function () {{
         if (i > 0) {{ var x = current.splice(i, 1)[0]; current.splice(i - 1, 0, x); render(); sync(); }}
       }});
       var down = document.createElement('button');
-      down.type = 'button'; down.textContent = '↓'; down.className = 'btn-sm btn-gray';
+      down.type = 'button'; down.textContent = '↓'; down.className = 'btn btn-sm btn-gray btn-secondary';
       down.title = '下移';
       down.addEventListener('click', function () {{
         if (i < current.length - 1) {{ var x = current.splice(i, 1)[0]; current.splice(i + 1, 0, x); render(); sync(); }}
       }});
       var del = document.createElement('button');
-      del.type = 'button'; del.textContent = '移除'; del.className = 'btn-sm btn-gray';
+      del.type = 'button'; del.textContent = '移除'; del.className = 'btn btn-sm btn-gray btn-secondary';
       del.addEventListener('click', function () {{ current.splice(i, 1); render(); sync(); }});
       ops.appendChild(up); ops.appendChild(document.createTextNode(' '));
       ops.appendChild(down); ops.appendChild(document.createTextNode(' '));
@@ -1419,7 +1488,7 @@ class AdminPages:
         (nm ? ' <span class="muted">默认英文名 ' + esc(nm) + '</span>' : '') + '</td>' +
         '<td></td>';
       var b = document.createElement('button');
-      b.type = 'button'; b.textContent = '加入'; b.className = 'btn-sm';
+      b.type = 'button'; b.textContent = '加入'; b.className = 'btn btn-sm btn-primary';
       b.addEventListener('click', function () {{ add(c.pid); if (search) search.value = ''; showCatalog(); }});
       tr.lastChild.appendChild(b);
       box.appendChild(tr);
@@ -1457,7 +1526,7 @@ class AdminPages:
 </div>
 
 <p style="margin-top:18px">
-  <button type="submit" style="font-size:16px;padding:12px 30px">保存</button>
+  <button type="submit" class="btn btn-primary">保存设置</button>
   <span class="muted">本场设置 + 名单导入 + 题目表一起保存。</span>
 </p>
 </form>
@@ -1479,8 +1548,10 @@ class AdminPages:
             duration = int(form.get("duration") or 0)
         except ValueError:
             duration = 0
+        from ..core.contest_time import parse_schedule
+        schedule = parse_schedule(form)
         c = store.create_contest(form.get("title", ""), form.get("rule", store.DEFAULT_RULE),
-                                 level=level, duration_min=duration or None)
+                                 level=level, **schedule)
         log(f"[管理端] 新建比赛 {c['id']} {c['title']}（{c['rule']}，{c['level']} 组，"
             f"{c['duration_min']} 分钟）")
         self._redirect(f"/admin{cid_query(q.get('key', ''), c['id'])}")
@@ -1743,7 +1814,10 @@ class AdminPages:
         picked: list[dict] = []
         raw_json = (form.get("problems_json") or "").strip()
         if raw_json:
-            for it in json.loads(raw_json):
+            parsed = json.loads(raw_json)
+            if not isinstance(parsed, list):
+                raise ValueError("problems_json 必须是数组")
+            for it in parsed:
                 if isinstance(it, dict):
                     pid = str(it.get("pid", "")).strip()
                     name = str(it.get("name") or it.get("slug") or "").strip()
@@ -1783,6 +1857,21 @@ class AdminPages:
             picked = self._parse_picked(form)
         except (ValueError, TypeError, AttributeError) as e:
             return f"选题数据格式不对（{e}），没有改动本场题目。", False
+        if full_default <= 0:
+            return "满分必须是正整数，没有改动本场题目。", False
+        known = localoj.problem_pids()
+        selected_pids = [p["pid"] for p in picked]
+        if len(set(selected_pids)) != len(selected_pids):
+            return "同一道题不能在本场重复配置，没有改动本场题目。", False
+        if any(pid not in known or make_problem.is_deleted(pid) for pid in selected_pids):
+            return "选中的题目不存在或已删除，没有改动本场题目。", False
+        for p in picked:
+            if p.get("full") not in (None, ""):
+                try:
+                    if int(p["full"]) <= 0:
+                        raise ValueError
+                except (ValueError, TypeError):
+                    return "每题满分必须是正整数，没有改动本场题目。", False
         exam = store.load_exam(cid)
         old = {str(p.get("pid")): p for p in exam.get("problems", [])}
         titles = {}
@@ -1840,10 +1929,11 @@ class AdminPages:
                     want = fallback
             if want in used_names:      # 同一场里不能重名（重名 = 同一个文件夹）
                 base, k = want, 2
-                while f"{base}_{k}" in used_names:
+                candidate = lambda n: base[:32 - len(str(n)) - 1] + f"_{n}"
+                while candidate(k) in used_names:
                     k += 1
-                notes.append(f"第 {i} 题的英文名「{want}」和前面某题重了，已改成 {base}_{k}")
-                want = f"{base}_{k}"
+                notes.append(f"第 {i} 题的英文名「{want}」和前面某题重了，已改成 {candidate(k)}")
+                want = candidate(k)
             used_names.add(want)
             item["name"] = want
             problems.append(item)
@@ -1863,14 +1953,14 @@ class AdminPages:
         return msg, True
 
     def _admin_release(self):
-        """本场属性开关：发布/收回成绩、开放/关闭提交；也承接本场管理页的几个表单。
+        """本场设置：发布/收回成绩、自动赛程；也承接本场管理页的几个表单。
 
         三个入口合成这一条路由（都在改"本场属性"，少一条 POST 路由就少动一次
         `web/server.py`）：
           * `action=save_all`  —— 本场管理页底部**唯一那个「保存」按钮**：
                                  本场设置 + 名单导入 + 题目表 一次全提交
           * `action=settings`  —— 只存「本场设置」（级别/时长/考号前缀）
-          * 带 `released`/`open` —— 发布/收回成绩、开放/关闭提交（立即生效的动作开关）
+          * 带 `released` —— 发布/收回成绩（比赛结束后可公布）
         """
         q = self._query()
         if not self._check_admin(q.get("key", "")):
@@ -1883,6 +1973,8 @@ class AdminPages:
         if not contest:
             self._redirect(admin_url(q.get("key", ""), msg="比赛不存在"))
             return
+        if "open" in form:
+            raise ValueError("比赛按设置的开始、结束时间控制，请在本场设置中修改时间。")
         if form.get("action") == "save_all":
             self._admin_save_all(cid, contest, form, q.get("key", ""))
             return
@@ -1895,11 +1987,6 @@ class AdminPages:
             except ValueError as e:
                 self._redirect(admin_url(q.get("key", ""), cid, str(e)))
                 return
-        if "open" in form:
-            if form["open"] == "1" and not contest.get("open", True):
-                store.update_contest(cid, started_at=int(time.time()))
-            contest["open"] = form["open"] == "1"
-            store.update_contest(cid, open=contest["open"])
         self._redirect(admin_url(q.get('key', ''), cid, "已更新。"))
 
     def _admin_save_all(self, cid: str, contest: dict, form: dict, key: str) -> None:
@@ -1915,14 +2002,14 @@ class AdminPages:
             notes.append(note)
         # 名单：没选分组、也没粘贴姓名 = 这次不动名单（不报错）
         msg, changed = self._apply_roster(cid, form)
-        if changed:
+        if msg:
             notes.append(msg)
         msg, changed = self._apply_exam(cid, form)
-        if changed:
+        if msg:
             notes.append(msg)
         log(f"[管理端] 本场管理保存 {cid}：" + "；".join(notes))
         tip = "；".join(notes) if notes else "没有需要保存的改动"
-        self._redirect(admin_url(key, cid, "保存成功 —— " + tip))
+        self._redirect(admin_url(key, cid, "保存结果：" + tip))
 
     def _apply_settings(self, cid: str, contest: dict, form: dict) -> str:
         """保存「本场设置」：级别、时长、考号前缀。返回一句结果说明。
@@ -1934,6 +2021,10 @@ class AdminPages:
 
         没提交 `level`（页面上被人提交过时会 disabled，浏览器就不发这个字段）时保持原级别。
         """
+        from ..core.contest_time import parse_schedule
+        schedule = parse_schedule(form, contest) if "start_at" in form or "end_at" in form else None
+        if (form.get("prefix") or "").strip():
+            store.normalize_prefix(form["prefix"])
         notes = []
         old_level = store.level_of(contest)
         level = (form.get("level") or old_level).strip().upper()
@@ -1941,8 +2032,9 @@ class AdminPages:
             level = old_level
         if level != old_level:
             if store.load_results(cid):
-                return ("本场已经有人提交，改级别会让考号与成绩对错人，已拒绝（其余改动照常保存）。"
-                        "要换级别请先删掉本场成绩（或新建一场考试）。")
+                notes.append("本场已有提交，级别修改已拒绝；其余设置继续保存。要换级别请新建比赛。")
+                level = old_level
+        if level != old_level:
             store.update_contest(cid, level=level)
             # 级别写在考号里（GD-J… / GD-S…），所以改了级别就得重发考号 —— 这正是
             # 原型上写的「改级别等于重发考号」。有人提交过的话上面已经拦住了，这里可以放心重发。
@@ -1956,8 +2048,18 @@ class AdminPages:
             duration = int(form.get("duration") or 0)
         except ValueError:
             duration = 0
-        if duration > 0:
-            store.update_contest(cid, duration_min=duration)
+        if schedule:
+            store.update_contest(cid, **schedule)
+            notes.append("开始、结束时间已保存（北京时间）")
+        elif duration > 0:
+            start, _ = contest_time.window(contest)
+            if start:
+                end = start + duration * 60
+                if not contest_time.timestamp(end):
+                    raise ValueError("比赛时长超出有效时间范围。")
+                store.update_contest(cid, duration_min=duration, end_at=end)
+            else:
+                store.update_contest(cid, duration_min=duration)
             notes.append(f"时长 {duration} 分钟")
         prefix = (form.get("prefix") or "").strip().upper()
         if prefix:
@@ -2249,12 +2351,14 @@ window.addEventListener('hashchange',openLinkedSource);
         cat = store.load_catalog()
         items = cat.get("items") or []
         err = ""
-        if not items:
-            try:
-                items = localoj.list_problems()
+        # The local registry is authoritative. An old cache can contain QA
+        # problems whose directories have already been archived.
+        try:
+            items = localoj.list_problems()
+            if items != cat.get('items'):
                 store.save_catalog(items)
-            except OSError as e:
-                err = f"读取评测站题库失败：{e}"
+        except OSError as e:
+            err = f"读取本地题库失败：{e}"
         codes = make_problem.load_codes()
         info = load_problem_info()
         titles = {str(it.get("pid", "")): str(it.get("title", "")) for it in items}
@@ -2289,23 +2393,9 @@ window.addEventListener('hashchange',openLinkedSource);
     def _statement_html(self, pid: str, cache_dir: str, fetch: bool) -> str:
         """题面 → HTML（服务端渲染，一份 Markdown 逻辑，见 core/markdown.py）。
 
-        本地缓存（`data/statements/<pid>.md`）有就直接渲染；没有的话**只对场上正在用
-        的题目**去评测站取一次（每取一次都是一次数据库查询，题库大了不能都取）。
+        每次读取 SQLite 正本，避免题库与比赛题面不同步。
         """
-        text = ""
-        path = os.path.join(cache_dir, f"{pid}.md")
-        if os.path.isfile(path):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    text = f.read()
-            except OSError:
-                text = ""
-        if not text.strip() and fetch:
-            try:
-                text = localoj.problem_statement(pid, cache_dir)
-            except Exception as e:                   # noqa: BLE001（评测站闹脾气不该让整页打不开）
-                log(f"[题目列表] 取题面 {pid} 失败：{e}")
-                text = ""
+        text = localoj.problem_statement(pid)
         return md_to_html(text) if text.strip() else ""
 
     def _catalog_view(self) -> tuple[list, list, list, dict, str]:
@@ -2350,22 +2440,24 @@ window.addEventListener('hashchange',openLinkedSource);
             tl_hover = "建题时没记下，点「自己测试」跑一遍就知道实际用时"
         sample_cell = (f'<span class="ok">有</span> <span class="muted">{r["sample_groups"]} 组</span>'
                        if r["sample_groups"] else '<span class="muted">—</span>')
-        use_note = ("　<span class=\"muted\">用在本场：" + "、".join(used[pid][:2]) + "</span>"
+        use_note = ('<div class="text-secondary small text-truncate" style="max-width:260px">用在本场：'
+                    + html.escape("、".join(used[pid][:2])) + "</div>"
                     if used.get(pid) else "")
-        # 表格不出现横向滚动条，靠 CSS 按列限宽 + 省略号截断；截掉的部分写在 title 里，
-        # 鼠标悬停能看全（老师要认题，不能把标题截得看不出来是哪道）。
+        # 官方响应式表格保留完整编号与限额；只有较长的使用场次提示截断。
         title_txt = str(r["title"] or "")
         hover = " · ".join(x for x in (title_txt, use_note and
                                        "用在本场：" + "、".join(used[pid])) if x)
         ops = (f'<div class="prob-ops">'
                f'<a class="btn btn-sm btn-gray" href="{problem_detail_url(key, pid)}">查看题面</a>'
+               f'<a class="btn btn-sm btn-gray" href="{problem_export_url(key, pid)}">导出 ZIP</a>'
                f'<button type="button" class="btn btn-sm" data-test="{esc(pid)}">自己测试</button>'
                f'<button type="button" class="btn btn-sm btn-danger" data-del="{esc(pid)}" '
                f'data-title="{esc(title_txt or pid)}">删除</button>'
                f'</div>')
         return (f'<tr><td><b>{html.escape(code) if code else "—"}</b></td>'
                 f'<td title="{esc(r["name"])}"><code>{html.escape(r["name"])}</code></td>'
-                f'<td title="{esc(hover)}">{html.escape(title_txt)}{use_note}</td>'
+                f'<td title="{esc(hover)}"><div class="text-wrap" style="min-width:150px;max-width:260px">'
+                f'{html.escape(title_txt)}</div>{use_note}</td>'
                 f'<td>{cases_cell}</td>'
                 f'<td class="muted" title="{esc(tl_hover)}">{tl_text}</td>'
                 f'<td>{sample_cell}</td>'
@@ -2420,8 +2512,8 @@ window.addEventListener('hashchange',openLinkedSource);
         _, rows, gone, used, _err = self._catalog_view()
         self._json({
             "ok": ok, "message": msg, "error": "" if ok else msg,
-            "rows": "".join(self._problem_row_html(key, r, used) for r in rows),
-            "deleted_html": self._deleted_block_html(key, gone, open_=True),
+            "rows": components("".join(self._problem_row_html(key, r, used) for r in rows)),
+            "deleted_html": components(self._deleted_block_html(key, gone, open_=True)),
             "live_count": len(rows), "gone_count": len(gone),
         })
 
@@ -2454,6 +2546,7 @@ window.addEventListener('hashchange',openLinkedSource);
  老师只用它定位这道题；<b>英文名</b>是学生在比赛里看到的名字（加进比赛时可以按场次再改）。
  点「查看题面」进这道题的<b>详情页</b>（左边 Markdown 原文可以直接改，右边就是学生看到的样子，
  同一页还能看标程）；点「自己测试」拿代码跑一遍全部测试点，确认数据与时限设置没问题。
+ 点「导出 ZIP」下载完整题包，可在另一台相同系统的「新建题目」直接上传；包含标程与答案，请妥善保存。
  删除是**从列表里收起来**（题面、提交记录都留着），删完页面停在原地，不跳回顶部。</p>
 {"<p class='warn'>" + html.escape(err) + "（下面这份清单来自考试服务自己的记录）</p>" if err else ""}
 <p><a class="btn" href="{admin_url(key, path='/admin/problem')}">+ 新建题目</a>
@@ -2462,11 +2555,11 @@ window.addEventListener('hashchange',openLinkedSource);
 
 <h2>全部题目（<span id="prob-live-count">{len(rows)}</span> 道）</h2>
 <div id="prob-flash"></div>
-<div class="card">
-<table class="csp-prob-table">
-<tr><th style="width:7%">题目编号</th><th style="width:9%">英文名</th><th>标题</th>
-    <th style="width:6%">测试点</th><th style="width:9%">时限 / 内存</th>
-    <th style="width:6%">大样例</th><th style="width:23%">操作</th></tr>
+<div class="card table-responsive">
+<table class="table-nowrap">
+<tr><th>题目编号</th><th>英文名</th><th>标题</th>
+    <th>测试点</th><th>时限 / 内存</th>
+    <th>大样例</th><th>操作</th></tr>
 <tbody id="prob-rows">
 {"".join(table_rows) or '<tr><td colspan="7" class="muted">题库还是空的：点上面的「新建题目」，'
                         '选整个出题文件夹（或 zip）就能自动识别建题。</td></tr>'}
@@ -2498,7 +2591,7 @@ window.addEventListener('hashchange',openLinkedSource);
   if (!btn) return;
   btn.addEventListener('click', function () {{
     var note = document.getElementById('csp-refresh-note');
-    note.textContent = '　正在读评测站题库…';
+    note.textContent = '　正在读取题库…';
     fetch('/api/problems' + (window.CSP_KEY_QUERY || '') +
           ((window.CSP_KEY_QUERY || '') ? '&' : '?') + 'refresh=1')
       .then(function (r) {{ return r.json(); }})
@@ -2544,6 +2637,8 @@ window.addEventListener('hashchange',openLinkedSource);
             self._send(page("题目详情", self._admin_nav(key) + back +
                             self._flash("err", f"题库里没有「{pid}」这道题。")), 404)
             return
+        if not rec.get("deleted"):
+            back = back.replace('</p>', f' <a class="btn btn-gray" href="{problem_export_url(key, pid)}">导出 ZIP</a></p>')
         cache_dir = os.path.join(store.DATA_DIR, "statements")
         text = localoj.problem_statement(pid) or self._statement_raw(pid, cache_dir)
         title = str(rec.get("title") or pid)
@@ -2609,7 +2704,9 @@ window.addEventListener('hashchange',openLinkedSource);
           <input type="number" name="memory_mb" min="16" step="16" value="{memory_mb or ''}"></div>
       </div>
       <p class="muted" style="font-size:13px;margin:8px 0 2px">
-        时限 / 内存<b>真的会改变判题</b>（下一次提交就按新值跑）；英文名只在「这场比赛没单独设过」时生效。</p>
+        英文名修改会同步到尚未结束、仍沿用原名的比赛；单独设过的名字和已结束比赛保留。
+        下一次交卷按新目录及新 <code>.in/.out</code> 文件名评测，请同步检查题面和标程。
+        清空英文名只清除题库默认值。</p>
       <label>题面（Markdown —— 左边写完，右边立刻就是学生看到的样子）</label>
       <textarea class="codebox" id="pd-src" name="statement" spellcheck="false">{esc(text)}</textarea>
       <p class="row" style="margin:10px 0 0">
@@ -2644,16 +2741,19 @@ window.addEventListener('hashchange',openLinkedSource);
     <b>题目编号不变</b>（现在是 <code>{html.escape(code) or "—"}</code>），
     <b>英文名 / 时限 / 内存保持原值</b>。立刻生效 —— 学生端题面、判题用的数据都是新的一份。</p>
   <form method="post" action="{up_url}" enctype="multipart/form-data" id="pd-up">
-    <input type="file" name="folder" id="pd-up-files" webkitdirectory directory multiple>
+    {_admin_upload_picker('pd-up-files', 'pd-up-zip')}
+    <input type="file" name="folder" id="pd-up-files" webkitdirectory directory multiple hidden aria-label="题目文件夹">
+    <input type="file" name="data" id="pd-up-zip" accept=".zip" hidden aria-label="题目 ZIP">
     <p style="margin:10px 0 0">
       <button type="submit" class="btn btn-danger" id="pd-up-go">上传并覆盖</button>
-      <span class="muted" id="pd-up-note">　还没有选文件夹（点左边的「选择文件」选整道题的文件夹）</span>
+      <span class="muted" id="pd-up-note">选择后可上传并覆盖当前题目。</span>
     </p>
   </form>
 </div>
 <script>
 (function () {{
   var inp = document.getElementById('pd-up-files');
+  var zip = document.getElementById('pd-up-zip');
   var note = document.getElementById('pd-up-note');
   var form = document.getElementById('pd-up');
   if (!inp || !note || !form) return;
@@ -2665,12 +2765,12 @@ window.addEventListener('hashchange',openLinkedSource);
       : '　还没有选文件夹';
   }});
   form.addEventListener('submit', function (e) {{
-    if (!inp.files || !inp.files.length) {{
+    if ((!inp.files || !inp.files.length) && (!zip.files || !zip.files.length)) {{
       e.preventDefault();
-      note.textContent = '　先选一个题目文件夹再点上传';
+      note.textContent = '先选择题目文件夹或 ZIP，再上传。';
       return;
     }}
-    if (!confirm('会用这个文件夹覆盖当前题目：题面、标程、测试数据、大样例都换成文件夹里的。\\n'
+    if (!confirm('会用所选内容覆盖当前题目：题面、标程、测试数据、大样例均会更新。\\n'
                  + '题目编号不变，英文名 / 时限 / 内存也不变。确定上传？')) e.preventDefault();
   }});
 }})();
@@ -2680,7 +2780,7 @@ window.addEventListener('hashchange',openLinkedSource);
 """
         self._send(page(f"题目详情 · {title}", body, math=True))
     def _admin_problem_reupload(self):
-        """重传整个出题文件夹，**覆盖**已有题目（题目详情页那个入口）。
+        """选择整个出题文件夹或 ZIP，**覆盖**已有题目（题目详情页那个入口）。
 
         与「新建题目」同一套规范（`题目.md` / `标程.cpp` / `data/01.in|out` / `大样例/`），
         只差两点：
@@ -2690,9 +2790,9 @@ window.addEventListener('hashchange',openLinkedSource);
           * 覆盖是这次的目的，所以 `create_problem(..., overwrite=True)`
             （新建题目那边仍然是"不覆盖、自动让位"，免得误撞已有的题）。
 
-        文件夹会换掉的：题名（取 `题目.md` 的一级标题）、题面、标程、测试数据、大样例。
-        不会被文件夹动的：**英文名**（`problem_info` 里那个默认名）、**时限 / 内存**
-        —— 文件夹里没有这两样，所以把原值传回去，免得被默认的 1000 / 256 悄悄冲掉。
+        文件夹会换掉题名、题面、标程、测试数据、大样例。
+        没有 problem.json 覆盖值时沿用原时限和内存；显式 JSON 限额与默认英文名生效。
+        题目编号和本场已配置的提交英文名保持。
         """
         q = self._query()
         key = q.get("key", "")
@@ -2722,7 +2822,7 @@ window.addEventListener('hashchange',openLinkedSource);
         std = ""
         for fn, field in file_fields.items():
             if field == "std":
-                std = files[fn].decode("utf-8", "replace")
+                std = make_problem.ip._decode(files[fn])
         old = load_problem_info().get(pid) or {}
         old_code = str(old.get("code") or "") or make_problem.code_of_pid(pid) or ""
         # 注意：`time_ms` / `memory_mb` 传**原值**（没有就退回默认）—— 文件夹里没有这两样，
@@ -2748,8 +2848,6 @@ window.addEventListener('hashchange',openLinkedSource);
         # 只在建题那条路上记过；覆盖重传不记的话，列表里还显示旧的题名与点数（踩过）。
         remember_problem(pid, title=str(rep.get("title") or ""),
                          code=str(rep.get("number") or ""), cases=rep.get("cases"),
-                         time_ms=int(old.get("time_ms") or 0) or None,
-                         memory_mb=int(old.get("memory_mb") or 0) or None,
                          std=std)
         # 题面字数**读刚落盘的那份**：`create_problem` 的报告里没有题面字段，
         # 拿它报"0 字"会让老师以为题面没传上（踩过）
@@ -2763,13 +2861,13 @@ window.addEventListener('hashchange',openLinkedSource);
             f"已用文件夹覆盖重传（{rep.get('title') or pid}）："
             f"{rep.get('cases')} 组测试数据、题面 {stmt_len} 字"
             + (f"、标程 {n_std} 字" if n_std else "")
-            + f"；题目编号仍是 {old_code or '（没变）'}，英文名 / 时限 / 内存保持原值。"
+            + f"；题目编号仍是 {old_code or '（没变）'}；未声明的限额沿用原值，problem.json 显式配置已生效。"
             f"学生端题面和判题数据**立刻**是新的一份。")))
 
     def _admin_problem_detail_post(self):
         """保存题目详情页的改动：**题面 + 题目名 + 英文名 + 时限 + 内存**。
 
-        分两处落盘：题面写 `data/statements/<pid>.md`（`localoj.set_problem_statement`），
+        题面和元信息均保存到 SQLite（`localoj.set_problem_statement`），
         题目名/英文名/时限/内存写编号登记与题目信息（`remember_meta`）。
         任何一处失败都**如实报出来**（绝不说"保存好了"）—— 老师要靠这句话判断能不能走开。
         """
@@ -2808,6 +2906,8 @@ window.addEventListener('hashchange',openLinkedSource);
         parts = [f"保存好了（{title or pid}）：题面已更新"]
         if changed:
             parts.append("，" + "、".join(changed) + "也改了")
+        if m.get("synced_contests"):
+            parts.append("；英文名已同步到比赛 " + "、".join(m["synced_contests"]))
         parts.append("。")
         parts.append("；".join(skipped) + "。" if skipped else "学生端立刻是新的。")
         self._redirect(problem_detail_url(key, pid, msg="".join(parts)))
@@ -2990,17 +3090,16 @@ window.addEventListener('hashchange',openLinkedSource);
         if not self._check_admin(q.get("key", "")):
             self._json({"ok": False, "error": "管理密钥不正确"}, 403)
             return
-        refresh = q.get("refresh") in ("1", "true", "yes")
         cat = store.load_catalog()
         items = cat.get("items") or []
         err = ""
-        if refresh or not items:
-            try:
-                items = localoj.list_problems()
+        try:
+            items = localoj.list_problems()
+            if items != cat.get('items'):
                 store.save_catalog(items)
                 cat = store.load_catalog()
-            except OSError as e:
-                err = f"读取评测站题库失败：{e}"
+        except OSError as e:
+            err = f"读取本地题库失败：{e}"
         codes = make_problem.load_codes()
         info = load_problem_info()
         out = []
@@ -3055,15 +3154,7 @@ window.addEventListener('hashchange',openLinkedSource);
     def _admin_statement(self, q: dict, flash: str = "", flash_kind: str = "ok"):
         """**改题面**（已有题目，不用删了重建）：一个 Markdown 编辑框 + 预览 + 保存。
 
-        题面的"真身"在**评测站**那边（题目文档的 `content` 字段，`localoj.problem_statement()`
-        读的就是它）；考试服务这边 `data/statements/<pid>.md` 只是**6 小时缓存**。
-        所以保存要**两处都写**：先写评测站，成功后再把缓存覆盖成新文本 ——
-        只写缓存的话，缓存一过期题面就"自己变回去"了（老师会以为白改了，踩过这个坑的机制见
-        `hydro_client.set_problem_statement` 的注释）。
-
-        编辑时**以评测站上的为准**（`ttl=0` 强制重取）：缓存可能过期、也可能被人手改过，
-        拿缓存当编辑起点会把过期的题面写回去。评测站取不到（容器没起来）时函数会退回缓存，
-        页面顶部会提示。
+        题面保存在 SQLite 中，管理端与考试页读取同一份内容。
         """
         key = q.get("key", "")
         if not self._check_admin(key):
@@ -3082,10 +3173,10 @@ window.addEventListener('hashchange',openLinkedSource);
             try:
                 text = localoj.problem_statement(pid, cache_dir=cache_dir, ttl=0)
             except Exception as e:                        # noqa: BLE001
-                warn = f"从评测站取题面失败（下面是本地缓存里那份）：{e}"
+                warn = f"读取题面失败：{e}"
                 text = self._statement_raw(pid, cache_dir)
             if not text.strip():
-                warn = warn or ("这道题在评测站上还没有题面 —— 保存之后就有了。")
+                warn = warn or ("这道题还没有题面，保存之后即可查看。")
                 text = self._statement_raw(pid, cache_dir)
         head_json = _js_json(f'<code>{code or pid}</code> {title}'
                              + (f' · <code>{gname}</code>' if gname else ''))
@@ -3097,7 +3188,7 @@ window.addEventListener('hashchange',openLinkedSource);
 {warn and f'<p class="warn">{html.escape(warn)}</p>' or ""}
 <p class="muted">正在改：<b>{html.escape(title or pid)}</b>
    （题目编号 <b>{html.escape(code or "—")}</b>，英文名 <code>{html.escape(gname or "—")}</code>）<br>
-   学生打开题面页看到的就是这里的内容。<b>保存后立刻生效</b>（评测站那份和本站缓存一起更新）。
+   学生打开题面页看到的就是这里的内容。<b>保存后立刻生效</b>（比赛页重新打开或自动刷新题面后即可看到）。
    只改题面 —— 测试数据、时限、标程都不动。</p>
 <form method="post" action="{statement_url(key, pid)}">
 <input type="hidden" name="pid" value="{html.escape(pid, quote=True)}">
@@ -3108,7 +3199,7 @@ window.addEventListener('hashchange',openLinkedSource);
   <textarea id="stmt-src" name="statement" spellcheck="false"
             style="min-height:420px">{html.escape(text)}</textarea>
   <p style="margin-top:14px"><button type="submit">保存题面</button>
-     <span class="muted">（写评测站 + 刷本站缓存）</span></p>
+     <span class="muted">（保存题面）</span></p>
 </div>
 </form>
 {_view_modal()}
@@ -3149,18 +3240,11 @@ window.addEventListener('hashchange',openLinkedSource);
         self._send(page(f"改题面 · {title or pid}", body, math=True))
 
     def _statement_raw(self, pid: str, cache_dir: str) -> str:
-        """只读本地缓存里那份题面原文（Markdown，不渲染）。"""
-        path = os.path.join(cache_dir, f"{pid}.md")
-        if not pid or not os.path.isfile(path):
-            return ""
-        try:
-            with open(path, encoding="utf-8") as f:
-                return f.read()
-        except OSError:
-            return ""
+        """读取 SQLite 中的题面原文。"""
+        return localoj.problem_statement(pid)
 
     def _admin_statement_post(self):
-        """保存题面：**先写评测站**（真身），成功后再把本地缓存覆盖掉。"""
+        """保存 SQLite 中的题面。"""
         q = self._query()
         key = q.get("key", "")
         if not self._check_admin(key):
@@ -3181,24 +3265,9 @@ window.addEventListener('hashchange',openLinkedSource);
             log(f"[管理端] 改题面失败 {pid}：{r.get('error')}")
             self._redirect(statement_url(key, pid, msg=f"保存失败：{r.get('error')}（题面没有改动）"))
             return
-        # 评测站写成功了，再把本站缓存刷成新文本（否则读的还是旧题面）
-        cache_dir = os.path.join(store.DATA_DIR, "statements")
-        wrote_cache = False
-        try:
-            os.makedirs(cache_dir, exist_ok=True)
-            with open(os.path.join(cache_dir, f"{pid}.md"), "w", encoding="utf-8",
-                      newline="\n") as f:
-                f.write((text or "").replace("\r\n", "\n").replace("\r", "\n"))
-            wrote_cache = True
-        except OSError as e:
-            log(f"[管理端] 改题面 {pid}：评测站写了，但刷本地缓存失败 {e!r}")
         title = str((load_problem_info().get(pid) or {}).get("title") or pid)
-        log(f"[管理端] 改题面 {pid}（{title}）：评测站 {r.get('field')} 已更新"
-            + ("，本地缓存已刷新" if wrote_cache else "，本地缓存刷新失败"))
-        msg = (f"题面已保存（{title}）—— 学生现在打开题面看到的就是新的了。"
-               if wrote_cache else
-               f"评测站上的题面已更新，但本站缓存没刷上（{title}）—— 最多 6 小时后会自己同步，"
-               f"着急的话重启一下服务。")
+        log(f"[管理端] 改题面 {pid}（{title}）：SQLite 已更新")
+        msg = f"题面已保存（{title}）—— 学生重新打开题面即可看到更新。"
         self._redirect(statement_url(key, pid, msg=msg))
 
     def _admin_problem(self, q: dict, flash: str = "", scan: dict | None = None,
@@ -3253,29 +3322,25 @@ window.addEventListener('hashchange',openLinkedSource);
 <h2>新建题目</h2>
 <form method="post" action="{admin_url(key, path='/admin/problem')}" enctype="multipart/form-data" id="mk-form">
 <div class="card">
-<p style="margin-top:0"><b>① 选出题文件夹</b>（选整个文件夹，或打包好的 zip）</p>
+<h3 class="card-title mb-3">1. 上传题目材料</h3>
+{_admin_upload_picker('mk-folder', 'mk-zip', clear_id='mk-clear')}
 <p><input type="file" name="folder" id="mk-folder" webkitdirectory directory multiple
-        style="padding:10px;background:#f0f9ff;border:1px dashed #38bdf8;border-radius:8px;width:100%"></p>
-<p class="muted">也可以只传一个 zip：<input type="file" name="data" id="mk-zip" accept=".zip"></p>
-<p>
-  <button type="button" class="btn btn-sm btn-gray" id="mk-clear">清空已选文件</button>
-  <span class="muted" id="mk-clear-note">选完文件夹之后，浏览器会<b>一直占着</b>这些文件
-    （在 Windows 上就表现为「文件正在被使用，改不了 / 删不掉」）—— 要在电脑上改文件，
-    先点这个「清空已选文件」，改完再重新选一次就行。<b>点「建题」之后，文件一传完就自动清空</b>，
-    不用管。</span>
-</p>
-<p class="muted">系统按出题工程的结构自动识别，例如：<br>
+        hidden aria-label="题目文件夹"></p>
+<input type="file" name="data" id="mk-zip" accept=".zip" hidden aria-label="题目 ZIP">
+<p class="text-secondary small" id="mk-clear-note">修改本机文件前可先清空选择；上传完成后会自动释放文件。</p>
+<details class="mb-3"><summary class="text-secondary">查看题包格式与识别说明</summary>
+<p class="muted mt-2">系统按出题工程的结构自动识别，例如：<br>
 <code>题目库/G01-加边后最小生成树/题目.md</code>（题面）、<code>…/标程.cpp</code>（标程）、
 <code>…/data/01.in 01.out</code>（评测数据）、<code>…/大样例/大样例.in/out</code>（大样例，学生可下载）、
 <code>…/data/样例1.in/out</code>（题目样例，不参与评测）。
 文件夹里有多道题时会<b>全部导入</b>。<br>
-<b>选完就在本机认一遍</b>：文件不上传，认出来的标题/题面/标程会直接填进下面，核对后再点「建题」。</p>
+文件夹在本机识别，ZIP 在上传后由服务器解包核验。每个包内的题目均独立导入。</p></details>
 <div id="mk-detect"></div>
 {scan_html}
 </div>
 
 <div class="card">
-<p><b>② 标题</b> <span class="muted">（已从文件夹名读出，可改；多道题时以每题自己的为准）</span></p>
+<p><b>2. 基本信息</b> <span class="muted">（已从文件夹名读出，可改；多道题时以每题自己的为准）</span></p>
 <input type="text" name="title" value="{html.escape(title_val)}" placeholder="例如 糖果分配">
 
 <div class="row" style="margin-top:12px">
@@ -3285,13 +3350,7 @@ window.addEventListener('hashchange',openLinkedSource);
   <span class="muted">学生用它建文件夹、命名源文件、写 <code>freopen</code>；
    只能用小写字母、数字、下划线。</span>
 </div>
-<p class="muted" style="margin:4px 0 0">
-  这里是<b>默认值</b>：加进某场比赛时会自动填进那场比赛的「英文名」列，可以按场次再改
-  （同一道题在不同场次可以叫不同的名字）。留空也行 —— 加进比赛时按本场顺序给
-  <code>p1</code>、<code>p2</code>…，老师在那时改成想要的名字。
-  <br><b>题目编号</b>（<code>T00001</code>）由系统分配、跟着题走，老师不用填、也不能改，
-  只用它定位查找。
-</p>
+<p class="muted" style="margin:4px 0 0">英文名用于考生的目录、源文件和输入输出文件，可在比赛中另行设置。题目编号由系统生成。</p>
 
 <div class="row" style="margin-top:12px">
   <span>时限(毫秒)</span><input type="text" name="time_ms" value="{html.escape(time_val)}" style="width:90px">
@@ -3299,7 +3358,7 @@ window.addEventListener('hashchange',openLinkedSource);
 </div>
 
 <p style="margin-top:14px">
-  <b>③ 题面</b> <span class="muted">（Markdown，支持 $…$ 公式；选出题文件夹时会自动读入 题目.md）</span>
+  <b>3. 题面</b> <span class="muted">（Markdown，支持 $…$ 公式；选出题文件夹时会自动读入 题目.md）</span>
   <button type="button" class="btn btn-sm btn-gray" data-modal-open="pv-modal" style="margin-left:6px">预览</button>
   <span class="muted">　在独立窗口里看学生打开题面时的样子（改题面会实时更新，Esc 关闭）</span>
 </p>
@@ -3307,7 +3366,7 @@ window.addEventListener('hashchange',openLinkedSource);
           style="min-height:220px">{html.escape(stmt_val)}</textarea>
 
 <p style="margin-top:14px">
-  <b>④ 标程</b> <span class="muted">（识别到就填进下面的框，可以直接看、直接改）</span>
+  <b>4. 标准程序</b> <span class="muted">（识别到就填进下面的框，可以直接看、直接改）</span>
 </p>
 <div class="codebox-bar">
   <span><span class="ok">✓</span> 标程 · <span id="std-count">—</span></span>
@@ -3318,13 +3377,13 @@ window.addEventListener('hashchange',openLinkedSource);
    style="padding:6px;width:auto">（文件名用 <code>标程.cpp</code>/<code>std.cpp</code>/
    <code>solution.cpp</code> 都能认出来；上面框里填了就以框里为准）</p>
 
-<p style="margin-top:14px"><b>⑤ 大样例</b>（单独设置，可选）</p>
+<p style="margin-top:14px"><b>5. 大样例</b>（单独设置，可选）</p>
 <p><input type="file" name="bigsample" multiple
-        style="padding:8px;background:#fffbeb;border:1px dashed #f59e0b;border-radius:8px;width:100%"></p>
+        class="form-control"></p>
 <p class="muted">这里传的大样例会存到考试服务，<b>学生在考试页点「下载大样例」就能拿走</b>
 （像 CSP 复赛那样可以在本机看大样例）；它<b>不参与评测、不影响分数</b>。
 出题文件夹里的 <code>大样例/</code> 目录会自动收进来。</p>
-<p style="margin-top:14px"><button type="submit">建题并导入评测站</button></p>
+<p style="margin-top:14px"><button type="submit">创建题目</button></p>
 <style>
 /* 上传进度条（只这一页用；样式跟着页面走，不占全局 CSS） */
 .up-bar {{ height: 10px; background: #e2e8f0; border-radius: 6px; overflow: hidden; }}
@@ -3347,7 +3406,7 @@ window.addEventListener('hashchange',openLinkedSource);
   <p class="muted" id="mk-up-note" style="margin:8px 0 0"></p>
 </div>
 <p class="muted">建完之后这道题立刻可以加进比赛：到比赛页「本场题目」里按<b>标题</b>搜索即可。<br>
-点「建题并导入评测站」之后<b>这里会显示进度</b>：先报上传百分比，传完再提示服务端在建题
+点「创建题目」之后<b>这里会显示进度</b>：先报上传百分比，传完再提示服务端在建题
 （一道题十几秒，数据多时更久）。<b>期间别关页面</b>。</p>
 </div>
 </form>
@@ -3458,7 +3517,7 @@ window.addEventListener('hashchange',openLinkedSource);
   var STD = ['标程.cpp', 'std.cpp', 'solution.cpp', 'ac.cpp', 'correct.cpp'];
   var DATA_DIRS = ['data', 'testdata', 'tests', 'test'];
   var BIG_DIRS = ['大样例', 'bigsample', 'big_samples'];
-  var CODE_RE = /^([A-Z]{{1,3}}\d{{2}})-(.*)$/;
+  var CODE_RE = /^([A-Z]{{1,3}}\\d{{2}})-(.*)$/;
 
   function say(html, cls) {{
     out.innerHTML = '<p class="' + (cls || 'muted') + '" style="margin:10px 0 0">' + html + '</p>';
@@ -3553,7 +3612,17 @@ window.addEventListener('hashchange',openLinkedSource);
     return '';
   }}
 
-  var idxMap = {{}};
+  var idxMap = {{}}, generation = 0, autoFilled = [];
+  function resetAuto() {{
+    generation++;
+    autoFilled.forEach(function (item) {{
+      if (item.el.value === item.value) {{ item.el.value = ''; item.el.dispatchEvent(new Event('input')); }}
+    }});
+    autoFilled = [];
+  }}
+  function fillAuto(el, value) {{
+    el.value = value; autoFilled.push({{el:el,value:value}}); el.dispatchEvent(new Event('input'));
+  }}
 
   async function readText(path) {{
     var f = idxMap[path];
@@ -3561,7 +3630,7 @@ window.addEventListener('hashchange',openLinkedSource);
     try {{ return await f.text(); }} catch (e) {{ return ''; }}
   }}
 
-  async function detect(files) {{
+  async function detect(files, seq) {{
     var idx = index(files);
     idxMap = idx.map;
     var dirs = problemDirs(idx);
@@ -3586,16 +3655,18 @@ window.addEventListener('hashchange',openLinkedSource);
       var stdPath = findFile(pre, STD, idx);
       // 填表单：标题、题面、标程（选完就填好，不用再点一次"识别"）
       var tf = document.querySelector('input[name=title]');
-      if (tf && !tf.value.trim()) tf.value = nm.title;
+      if (tf && !tf.value.trim()) fillAuto(tf, nm.title);
       var ss = document.getElementById('stmt-src');
       if (ss && !ss.value.trim() && stmtPath) {{
-        ss.value = await readText(stmtPath);
-        ss.dispatchEvent(new Event('input'));
+        var statementText = await readText(stmtPath);
+        if (seq !== generation) return;
+        fillAuto(ss, statementText);
       }}
       var sd = document.getElementById('std-src');
       if (sd && !sd.value.trim() && stdPath) {{
-        sd.value = await readText(stdPath);
-        sd.dispatchEvent(new Event('input'));
+        var standardText = await readText(stdPath);
+        if (seq !== generation) return;
+        fillAuto(sd, standardText);
       }}
       lines.push('<b>识别到出题工程结构</b>：' + esc(base(pre))
                  + '（分类号 <code>' + esc(nm.pid) + '</code>，题名 '
@@ -3607,20 +3678,23 @@ window.addEventListener('hashchange',openLinkedSource);
       lines.push('上面这些已经填进下面的表单了（题面/标程可以直接改）。'
                  + '点「建题」时<b>整个文件夹一起上传</b>，服务端再核一遍。');
     }}
-    say(lines.join('<br>'));
+    if (seq === generation) say(lines.join('<br>'));
   }}
 
   if (fin) {{
     fin.addEventListener('change', function () {{
+      resetAuto();
       if (!fin.files || !fin.files.length) {{ out.innerHTML = ''; return; }}
       say('正在本机识别…');
-      detect(fin.files).catch(function (e) {{ say('识别时出错：' + esc(e), 'err'); }});
+      var seq = generation;
+      detect(fin.files, seq).catch(function (e) {{ if (seq === generation) say('识别时出错：' + esc(e), 'err'); }});
     }});
   }}
   if (zin) {{
     zin.addEventListener('change', function () {{
+      resetAuto();
       if (!zin.files || !zin.files.length) return;
-      say('zip 不在浏览器里预览（读不了压缩包）—— 直接点「建题并导入评测站」，'
+      say('已选择 ZIP。点击「创建题目」后，'
           + '服务端会解开并把里面认出来。');
     }});
   }}
@@ -3635,7 +3709,7 @@ window.addEventListener('hashchange',openLinkedSource);
 
      ① 传输阶段：用 `xhr.upload.onprogress` 报**真实百分比**（还有已传/总大小、速度）
      ② 服务端阶段：传完（`xhr.upload.onload`）之后进度条变成流动条纹，提示
-        "正在解包/配对测试点/导入评测站，别关页面" —— 这一段服务端没有细粒度进度
+        "正在解包/配对测试点/保存题库，别关页面" —— 这一段服务端没有细粒度进度
         （建题是同步跑的，见 core/problems.create_problem），所以只报"在跑"，不报百分比，
         不瞎编数字。
 
@@ -3692,14 +3766,14 @@ window.addEventListener('hashchange',openLinkedSource);
 
   function stop(why) {{
     form.dataset.busy = '';
-    if (btn) {{ btn.disabled = false; btn.textContent = '建题并导入评测站'; }}
+    if (btn) {{ btn.disabled = false; btn.textContent = '创建题目'; }}
     if (bar) bar.classList.remove('busy');
     if (fill) fill.style.width = '0%';
     if (titleEl) titleEl.textContent = '没传成功';
     if (noteEl) {{
       /* 网络断了这种"没发出去"的情况**不松手**：文件还在选择里，重试一下就行。
          这会儿真想改文件，上面那个「清空已选文件」随时能点。 */
-      noteEl.innerHTML = esc(why) + ' 再点一次「建题并导入评测站」重试；'
+      noteEl.innerHTML = esc(why) + ' 再点一次「创建题目」重试；'
         + '选好的文件还在，不用重新选（这会儿想改文件，点上面的「清空已选文件」）。';
     }}
   }}
@@ -3722,7 +3796,7 @@ window.addEventListener('hashchange',openLinkedSource);
     if (titleEl) titleEl.textContent = '正在上传出题文件夹…';
     if (noteEl) {{
       noteEl.innerHTML = '一共约 ' + mb(bytes) + '。传完由服务端解包、配对测试点、'
-        + '导入评测站。';
+        + '保存题库。';
     }}
 
     var xhr = new XMLHttpRequest();
@@ -3755,7 +3829,7 @@ window.addEventListener('hashchange',openLinkedSource);
       if (fill) fill.style.width = '100%';
       if (bar) bar.classList.add('busy');
       if (noteEl) {{
-        noteEl.innerHTML = '正在解包、配对测试点、导入评测站 —— 一道题通常十几秒，'
+        noteEl.innerHTML = '正在解包、配对测试点、保存题库 —— 一道题通常十几秒，'
           + '数据多或题库大时更久。<b>这一段没有细粒度进度，请别关页面、别刷新</b>，'
           + '跑完会自动跳转。<br>出题文件夹已经不在浏览器手里了（可以放心去电脑上改文件）。';
       }}
@@ -3975,7 +4049,7 @@ window.addEventListener('hashchange',openLinkedSource);
         std_source = ""
         for fn, field in list(file_fields.items()):
             if field == "std":
-                std_source = files[fn].decode("utf-8", "replace")
+                std_source = make_problem.ip._decode(files[fn])
             elif field == "bigsample":
                 big_files[fn] = files[fn]
             elif field in ("folder", "data"):
@@ -3994,7 +4068,8 @@ window.addEventListener('hashchange',openLinkedSource);
             return
 
         # 先看是不是出题工程结构、里面有几道题
-        det = make_problem.detect_bundle(make_problem.unpack(uploads)[0])
+        uploads, unpack_notes = make_problem.unpack(uploads)
+        det = make_problem.detect_bundle(uploads)
 
         def _retry(message: str) -> None:
             """建题没成：把**服务端认出来的结果**和老师填过的字段带回建题页，改一处就能重试。
@@ -4042,8 +4117,7 @@ window.addEventListener('hashchange',openLinkedSource);
             for it in good:      # 记下测试点数/时限/内存/标程（「题目列表」页要用）
                 remember_problem(it["pid"], title=it.get("title", ""),
                                  code=it.get("number", ""), name=it.get("name", ""),
-                                 cases=it.get("cases"), time_ms=_int("time_ms", 1000),
-                                 memory_mb=_int("memory_mb", 256))
+                                 cases=it.get("cases"))
             samples = [i for i in good if i.get("samples")]
             if samples:
                 msg += f"；其中 {len(samples)} 道带大样例（学生可下载）"
@@ -4087,8 +4161,7 @@ window.addEventListener('hashchange',openLinkedSource);
         # 记下这道题的元信息（测试点数/时限/内存/标程）——「题目列表」页与「自己测试」要用
         remember_problem(rep["pid"], title=rep.get("title", ""), code=rep.get("number", ""),
                          name=rep.get("name", ""),
-                         cases=rep.get("cases"), time_ms=_int("time_ms", 1000),
-                         memory_mb=_int("memory_mb", 256), std=std_source)
+                         cases=rep.get("cases"), std=std_source)
 
         msg = (f"题目 {rep.get('number') or rep['pid']}（{rep['title']}）已导入，"
                f"共 {rep['cases']} 组测试数据"
@@ -4148,9 +4221,9 @@ window.addEventListener('hashchange',openLinkedSource);
         pid = (fields.get("pid") or "").strip()
         if not text.strip() and pid:
             cache_dir = os.path.join(store.DATA_DIR, "statements")
-            self._json({"ok": True, "html": self._statement_html(pid, cache_dir, fetch=True)})
+            self._json({"ok": True, "html": components(self._statement_html(pid, cache_dir, fetch=True))})
             return
-        self._json({"ok": True, "html": md_to_html(text) if text.strip() else ""})
+        self._json({"ok": True, "html": components(md_to_html(text)) if text.strip() else ""})
 
     def _serve_doc(self, path_: str, title: str) -> None:
         """把一份 Markdown 文档当网页渲染出来（目前只有 `/docs/problemset`）。
@@ -4163,7 +4236,8 @@ window.addEventListener('hashchange',openLinkedSource);
         if not os.path.isfile(path_):
             self._send(page(title, '<p class="muted">文档文件缺失。</p>'), 404)
             return
-        text = open(path_, encoding="utf-8").read()
+        with open(path_, encoding="utf-8") as f:
+            text = f.read()
         body = ('<p><a class="btn btn-gray" href="/admin">返回管理端</a></p>'
                 f'<div class="card stmt" style="overflow:auto">{md_to_html(text)}</div>')
         self._send(page(title, body))
@@ -4177,44 +4251,45 @@ window.addEventListener('hashchange',openLinkedSource);
             self._json({"ok": False, "error": "服务端缺少 import_problemset.py"}, 500)
             return
         try:
-            fields, files, _ff = self._parse_multipart(MAX_PS_UPLOAD)
+            fields, files, file_fields = self._parse_multipart(MAX_PS_UPLOAD)
         except ValueError as e:
             self._json({"ok": False, "error": str(e)}, 400)
             return
-        blob = files.get("file") or files.get("zipfile")
-        if blob is None and files:
-            blob = next(iter(files.values()))
+        selected = [name for name in files if file_fields.get(name) in ("file", "zipfile")]
+        if len(files) != 1 or len(selected) != 1:
+            self._json({"ok": False, "error": "请通过 file 字段上传且只上传一个题单 ZIP。"}, 400)
+            return
+        blob = files[selected[0]]
         if not blob:
             self._json({"ok": False, "error": "没有收到题单文件（表单字段名请用 file）"}, 400)
             return
         if blob[:2] != b"PK":
             self._json({"ok": False, "error": "上传的不是 zip 文件"}, 400)
             return
+        try:
+            time_ms = int(fields.get("time") or 1000)
+            memory_mb = int(fields.get("memory") or 256)
+            if time_ms <= 0 or memory_mb <= 0:
+                raise ValueError
+        except ValueError:
+            self._json({"ok": False, "error": "time 和 memory 必须是正整数。"}, 400)
+            return
+        job = "ps-%d-%s" % (int(time.time()), os.urandom(6).hex())
+        work = os.path.join(store.DATA_DIR, "ps-jobs", job)
+        zip_path = os.path.join(work, "problemset.zip")
         with PS_JOBS_LOCK:
             if sum(info.get("state") == "running" for info in PS_JOBS.values()) >= 2:
                 return self._json({"ok": False, "error": "已有题单正在导入，请稍后重试。"}, 429)
             completed = [k for k, v in PS_JOBS.items() if v.get("state") != "running"]
             for old in completed[:-62]: PS_JOBS.pop(old, None)
-        job = "ps-%d-%s" % (int(time.time()), os.urandom(3).hex())
-        work = os.path.join(HERE, "ps-jobs", job)
-        os.makedirs(work, exist_ok=True)
-        zip_path = os.path.join(work, "problemset.zip")
-        with open(zip_path, "wb") as f:
-            f.write(blob)
-        with PS_JOBS_LOCK:
+            # 在同一把锁内检查并占用名额，包含落盘阶段，避免并发请求穿过上限。
             PS_JOBS[job] = {"state": "running", "progress": "已收到题单，开始解析…",
                             "report": None, "error": "", "started": time.time()}
 
-        def _int(name, default):
-            try:
-                return int(fields.get(name) or default)
-            except ValueError:
-                return default
-
         opts = {
             "tags": [x for x in [fields.get("tag", "").strip()] if x],
-            "time_ms": _int("time", 1000),
-            "memory_mb": _int("memory", 256),
+            "time_ms": time_ms,
+            "memory_mb": memory_mb,
             "only": [x.strip() for x in (fields.get("only") or "").split(",") if x.strip()],
             # 默认英文名：与命令行 --code 同一套写法（`G01=candy` 逐题 / `candy` 整体），
             # 一个字段里可以逗号分隔多题
@@ -4223,7 +4298,21 @@ window.addEventListener('hashchange',openLinkedSource);
             "overwrite": fields.get("overwrite") in ("1", "true", "on"),
             "dry_run": fields.get("dry_run") in ("1", "true", "on"),
         }
-        threading.Thread(target=_ps_worker, args=(job, zip_path, opts), daemon=True).start()
+        try:
+            # 应用目录在正式部署中只读；上传必须写入配置的数据目录。
+            os.makedirs(os.path.dirname(work), mode=0o700, exist_ok=True)
+            os.makedirs(work, mode=0o700)
+            with open(zip_path, "wb") as f:
+                f.write(blob)
+            threading.Thread(target=_ps_worker, args=(job, zip_path, opts), daemon=True).start()
+        except (OSError, RuntimeError):
+            log("[题单导入] 创建后台任务失败：\n" + traceback.format_exc())
+            with PS_JOBS_LOCK:
+                PS_JOBS.pop(job, None)
+            if os.path.isdir(work):
+                shutil.rmtree(work, ignore_errors=True)
+            self._json({"ok": False, "error": "无法保存题单或启动导入任务，请检查服务存储状态。"}, 500)
+            return
         log(f"[题单导入] 收到 {len(blob) / 1048576:.1f}MB，任务 {job}")
         self._json({"ok": True, "job": job,
                     "message": f"已接收题单（{len(blob) / 1048576:.1f} MB），正在后台导入",
@@ -4275,6 +4364,6 @@ def _ps_worker(job: str, zip_path: str, opts: dict) -> None:
                                 progress="导入失败：" + str(exc)[:200])
     finally:
         work = os.path.realpath(os.path.dirname(zip_path))
-        parent = os.path.realpath(os.path.join(HERE, "ps-jobs"))
+        parent = os.path.realpath(os.path.join(store.DATA_DIR, "ps-jobs"))
         if os.path.dirname(work) == parent and os.path.basename(work) == job:
             shutil.rmtree(work, ignore_errors=True)

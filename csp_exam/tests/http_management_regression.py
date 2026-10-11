@@ -16,6 +16,7 @@ import urllib.parse
 from unittest.mock import patch
 import zipfile
 
+from csp_exam.tests.live_hydro_fixture import live_hydro_fixture
 from csp_exam.core import importer, judgelocal, problems, scoreboard, security, store
 from csp_exam.web import admin_pages
 from csp_exam.web.server import Handler
@@ -49,12 +50,11 @@ def main():
     def check(label, value):
         checks.append({"name":label,"ok":bool(value)})
         if not value: raise AssertionError(label)
-    with tempfile.TemporaryDirectory(prefix="csp-management-") as tmp, \
+    with (live_hydro_fixture(prefix="csp-management-",data_subdir="data") if live else tempfile.TemporaryDirectory(prefix="csp-management-")) as tmp, \
         patch.object(store,"DATA_DIR",str(Path(tmp)/"data")), \
         patch.object(judgelocal,"PROBLEMS_DIR",str(Path(tmp)/"data/problems")), \
-        patch.object(admin_pages,"HERE",tmp), \
         patch.object(Handler,"log_message",lambda *args: None):
-        Path(store.DATA_DIR).mkdir()
+        Path(store.DATA_DIR).mkdir(exist_ok=True)
         server=ThreadingHTTPServer(("127.0.0.1",0),Handler); server.daemon_threads=True
         thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
         admin=security.ADMIN_COOKIE+"="+security.make_admin_cookie()
@@ -79,7 +79,7 @@ def main():
                 check("教师操作需要鉴权 "+path,status==403)
             check("未登录考生须知可读",request("GET","/help",cookie="")[0]==200)
             check("错误比赛须知拒绝",request("GET","/help?c=missing",cookie="")[0]==404)
-            check("新建比赛",post("/admin/new",{"title":"按钮验收","rule":"CSP","level":"S","duration":"240"}))
+            check("新建比赛",post("/admin/new",{"title":"按钮验收","rule":"CSP","level":"S","start_at":str(int(time.time())-600),"end_at":str(int(time.time())+14400)}))
             cid=store.list_contests()[0]["id"]
             check("分组创建",post("/admin/groups",{"action":"create","group_name":"验收班","names":"甲\n乙\n甲"}))
             group=store.load_groups()[0];check("分组自动合并重名",len(group["students"])==2)
@@ -109,6 +109,7 @@ def main():
             store.put_result(cid,kh,result)
             before_roster=store.load_roster(cid)
             check("有提交不能替换名单",post("/admin/roster?c="+cid,{"names":"其他学生","mode":"replace"}) and store.load_roster(cid)==before_roster)
+            store.update_contest(cid,end_at=int(time.time())-1)
             check("公布成绩",post("/admin/release?c="+cid,{"released":"1"}) and store.load_exam(cid)["released"])
             status,_,body=request("GET","/api/scoreboard?c="+cid,cookie="")
             check("公开榜接通",status==200 and json.loads(body)["rows"][0]["total"]==100)
@@ -125,7 +126,8 @@ def main():
                     script=Path(tmp)/("script-"+str(len(checks))+"-"+str(i)+".js");script.write_text(js)
                     node=os.environ.get("CSP_NODE_PATH") or shutil.which("node") or ""
                     if node:check("内联脚本语法 "+path,subprocess.run([node,"--check"],input=js,text=True,capture_output=True).returncode==0)
-            for path in ["/hall?c="+cid,"/score?c="+cid,"/problem?c="+cid+"&p=1","/contests"]:
+            check("赛后隐藏题面",request("GET","/problem?c="+cid+"&p=1",cookie=student)[0]==403)
+            for path in ["/hall?c="+cid,"/score?c="+cid,"/contests"]:
                 check("学生页面 "+path,request("GET",path,cookie=student)[0]==200)
             status,_,body=request("GET",f"/admin/testcase?c={cid}&k={kh}&n=1&t=1")
             check("逐点详情 API",status==200 and json.loads(body).get("ok"))
@@ -133,7 +135,10 @@ def main():
             check("下载代码",request("GET",f"/admin/file?c={cid}&k={kh}&f=sum/sum.cpp&dl=1")[0]==200)
             if live:
                 status,_,body=request("POST","/admin/selftest",{"pid":"G01","source":SOURCE,"io_mode":"file"})
-                check("自己测试真实编译运行",status==200 and json.loads(body).get("passed")==1)
+                result=json.loads(body)
+                if status!=200 or result.get("passed")!=1:
+                    raise AssertionError("自己测试真实编译运行："+str(status)+" "+body.decode())
+                check("自己测试真实编译运行",True)
             status,_,body=request("POST","/admin/selftest",{"pid":"G01","source":SOURCE,"io_mode":"unknown"})
             check("无效评测模式拒绝",status==400)
             # All views use one ranking projection, including stale keys and orphan results.
@@ -170,8 +175,7 @@ def main():
             check("重传后数据仍成对",judgelocal.cases_of("G01")[0]["out"]==b"5\n")
             check("删除分组",post("/admin/groups",{"action":"delete","gid":group["gid"]}) and not store.get_group(group["gid"]))
             check("收回成绩",post("/admin/release?c="+cid,{"released":"0"}) and not store.load_exam(cid)["released"])
-            check("关闭提交",post("/admin/release?c="+cid,{"open":"0"}) and not store.get_contest(cid)["open"])
-            check("开放提交",post("/admin/release?c="+cid,{"open":"1"}) and store.get_contest(cid)["open"])
+            check("拒绝旧手动提交开关",request("POST","/admin/release?c="+cid,{"open":"1"})[0]==400)
             check("退出登录",request("GET","/logout",cookie=student)[0] in (302,303))
             check("删除临时比赛",post("/admin/delete?c="+cid,{}) and not store.get_contest(cid))
         finally:

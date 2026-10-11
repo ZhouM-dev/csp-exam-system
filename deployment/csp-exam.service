@@ -1,0 +1,29 @@
+[Unit]
+Description=CSP contest application
+After=network.target
+
+[Service]
+Type=simple
+User=csp-exam
+Group=csp-exam
+WorkingDirectory=/opt/csp-exam/current
+EnvironmentFile=/etc/csp-exam.env
+ExecStart=/usr/bin/python3 -m csp_exam
+Restart=on-failure
+RestartSec=3
+StateDirectory=csp-exam
+LogsDirectory=csp-exam
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/csp-exam /var/log/csp-exam
+CPUQuota=50%
+MemoryHigh=256M
+MemoryMax=512M
+TasksMax=256
+OOMScoreAdjust=500
+
+[Install]
+WantedBy=multi-user.target

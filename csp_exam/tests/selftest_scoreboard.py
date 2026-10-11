@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.parse
 from unittest.mock import patch
@@ -44,7 +45,7 @@ class Scoreboard(unittest.TestCase):
         self.problems = [{"no": 1, "pid": "A", "name": "candy", "full": 100},
                          {"no": 7, "pid": "B", "name": "seat", "full": 50}]
         self.exam = {"problems": self.problems, "released": True}
-        store._save(store._path("contests.json"), [{"id": self.cid, "title": "测试比赛", "rule": "CSP", "open": True}])
+        store._save(store._path("contests.json"), [{"id": self.cid, "title": "测试比赛", "rule": "CSP", "start_at": 1, "end_at": 2, "open": True}])
         store.save_exam(self.cid, self.exam)
         store._save(store._path("contests", self.cid, "roster.json"),
                     {self.kh: {"name": "甲"}, "GD-S23456": {"name": "乙"},
@@ -77,12 +78,14 @@ class Scoreboard(unittest.TestCase):
 
     def test_zero_feedback_in_api_and_html(self):
         store.save_exam(self.cid, {**self.exam, "released": False})
-        _, _, data = self.get()
+        status, _, data = self.get()
+        self.assertEqual(status, 403)
         state = json.loads(data)
         self.assertFalse(state["released"])
         self.assertNotIn("rows", state)
         self.assertNotIn("problems", state)
-        _, _, data = self.get("/scoreboard?c=board")
+        status, _, data = self.get("/scoreboard?c=board")
+        self.assertEqual(status, 403)
         self.assertNotIn("甲", data.decode())
         self.assertNotIn("candy", data.decode())
 
@@ -108,8 +111,8 @@ class Scoreboard(unittest.TestCase):
         _, headers, _ = self.get()
         store.save_exam(self.cid, {**self.exam, "released": False})
         status, new_headers, data = self.get(etag=headers["ETag"])
-        self.assertEqual(status, 200)
-        self.assertNotEqual(headers["ETag"], new_headers["ETag"])
+        self.assertEqual(status, 403)
+        self.assertNotIn("ETag", new_headers)
         self.assertNotIn("rows", json.loads(data))
 
     def test_teacher_tag_cannot_select_teacher_projection_publicly(self):
@@ -136,6 +139,8 @@ class Scoreboard(unittest.TestCase):
         self.assertNotIn("判题由本机", text)
         self.assertNotIn("不使用 ICPC", text)
         _, _, data = self.get("/scoreboard?c=board", admin=True)
+        self.assertNotIn('href="/admin/student?', data.decode())
+        _, _, data = self.get("/admin/scoreboard?c=board", admin=True)
         self.assertIn('href="/admin/student?c=board&amp;k=GD-S12345#T7"', data.decode())
         self.assertIn('private=1', data.decode())
 
@@ -175,6 +180,9 @@ class Scoreboard(unittest.TestCase):
         cookie = headers["Set-Cookie"].split(";", 1)[0]
         status, _, data = self.get(headers["Location"], cookie=cookie)
         self.assertEqual(status, 200)
+        self.assertNotIn('k=GD-S12345#T7', data.decode())
+        status, _, data = self.get("/admin/scoreboard?c=board", cookie=cookie)
+        self.assertEqual(status, 200)
         self.assertIn('k=GD-S12345#T7', data.decode())
         status, headers, _ = self.get("/admin/login?next=%2Fscoreboard%3Fc%3Dboard", cookie=cookie)
         self.assertEqual(status, 302)
@@ -206,7 +214,7 @@ class Scoreboard(unittest.TestCase):
         self.assertTrue(state["released"])
         self.assertFalse(state["published"])
         _, _, data = self.get("/admin/scoreboard?c=board", admin=True)
-        self.assertIn('class="badge">未公布', data.decode())
+        self.assertRegex(data.decode(), r'<span id="published"[^>]*>未公布</span>')
 
     def test_hostile_name_is_text_not_markup(self):
         name = '</script><img src=x onerror=alert(1)>'
@@ -270,6 +278,48 @@ class Scoreboard(unittest.TestCase):
     def test_missing_contest_is_404(self):
         status, _, _ = self.get("/api/scoreboard?c=missing")
         self.assertEqual(status, 404)
+
+    def test_contest_window_blocks_public_html_api_and_teacher_cookie_upgrade(self):
+        now = int(time.time())
+        student = "csp=" + security.make_cookie(self.cid, self.kh)
+        _, old_headers, _ = self.get()
+        for start, end in ((now + 60, now + 120), (now - 60, now + 120)):
+            store.update_contest(self.cid, start_at=start, end_at=end)
+            # 防御异常旧数据：即便提前标成已公布，赛中也必须保密。
+            store.save_exam(self.cid, self.exam)
+            for cookie in ("", student, self.admin, student + "; " + self.admin):
+                for path in ("/scoreboard?c=board", "/scoreboard?c=board&private=1",
+                             "/api/scoreboard?c=board"):
+                    with self.subTest(start=start, cookie_role=bool(cookie), path=path):
+                        status, headers, data = self.get(path, cookie=cookie, etag=old_headers["ETag"])
+                        self.assertEqual(status, 403)
+                        self.assertEqual(headers["Cache-Control"], "no-store")
+                        self.assertNotIn("甲", data.decode())
+                        self.assertNotIn("candy", data.decode())
+                        if path.startswith("/api/"):
+                            self.assertNotIn("rows", json.loads(data))
+                            self.assertNotIn("problems", json.loads(data))
+            status, _, data = self.get("/admin/scoreboard?c=board", admin=True)
+            self.assertEqual(status, 200)
+            self.assertIn('k=GD-S12345#T7', data.decode())
+            status, _, data = self.get("/api/scoreboard?c=board&private=1", cookie=student)
+            self.assertEqual(status, 403)
+            self.assertNotIn("rows", json.loads(data))
+
+    def test_deadline_publication_and_withdrawal_are_checked_before_etag(self):
+        end = int(time.time()) + 120
+        store.update_contest(self.cid, start_at=end - 180, end_at=end)
+        store.save_exam(self.cid, self.exam)
+        with patch("csp_exam.core.contest_time.time.time", return_value=end - 1):
+            self.assertEqual(self.get()[0], 403)
+        with patch("csp_exam.core.contest_time.time.time", return_value=end):
+            status, headers, data = self.get()
+            self.assertEqual(status, 200)
+            self.assertIn("rows", json.loads(data))
+            store.save_exam(self.cid, {**self.exam, "released": False})
+            status, _, data = self.get(etag=headers["ETag"])
+            self.assertEqual(status, 403)
+            self.assertNotIn("rows", json.loads(data))
 
 
 if __name__ == "__main__":
